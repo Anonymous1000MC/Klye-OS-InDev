@@ -27,7 +27,7 @@ ROOTFS := rootfs
 TOOLS := $(BUILD_DIR)/tools
 VFS_IMAGE := $(BUILD_DIR)/vfs_image.c
 
-C_SOURCES := kernel.c scheduler.c mem.c gfx.c font.c input.c vfs.c apps.c shell.c wm.c gui.c
+C_SOURCES := kernel.c scheduler.c mem.c gfx.c font.c input.c vfs.c launcher.c apps.c shell.c wm.c gui.c
 ASM_SOURCES := interrupts.S context.S
 OBJECTS := $(addprefix $(BUILD_DIR)/,$(C_SOURCES:.c=.o)) \
            $(addprefix $(BUILD_DIR)/,$(ASM_SOURCES:.S=.o)) \

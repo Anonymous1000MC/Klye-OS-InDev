@@ -6,6 +6,7 @@
 #include "gui.h"
 #include "input.h"
 #include "io.h"
+#include "launcher.h"
 #include "kernel.h"
 #include "scheduler.h"
 #include "shell.h"
@@ -725,6 +726,8 @@ void kernel_main(uint64_t framebuffer_address, uint32_t pitch,
     } else {
         post("VIRTUAL FILESYSTEM", "MISSING");
     }
+    launcher_scan();
+    post_number("  launchers in /bin: ", (uint32_t)launcher_count(), "\n");
 
     pit_init(1000);
     post("PROGRAMMABLE INTERVAL TIMER", "OK");

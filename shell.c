@@ -6,6 +6,7 @@
 #include "gfx.h"
 #include "input.h"
 #include "io.h"
+#include "launcher.h"
 #include "kernel.h"
 #include "scheduler.h"
 #include "shell.h"
@@ -279,6 +280,8 @@ static void cmd_help(void)
     shell_row("neofetch", "system summary", 14);
     shell_row("reboot", "restart the machine", 14);
     shell_row("bench [N]", "measure compositor speed", 14);
+    shell_row("which NAME", "resolve from /bin", 14);
+    shell_row("launchers", "list /bin launchers", 14);
     shell_row("dumpmem [KB] [MB]", "fill memory, then panic", 14);
     terminal_puts("\n");
     shell_row("pwd", "print directory", 14);
@@ -1145,19 +1148,102 @@ static void cmd_rm(char **tokens, int count)
     }
 }
 
+static int shell_launcher_target(const char *name, char *entry, int entry_max)
+{
+    int slot = launcher_resolve(name);
+    int builtin;
+
+    if (slot >= 0) {
+        if (launcher_is_builtin(slot, entry, entry_max)) {
+            return app_from_name(entry);
+        }
+        return -2;
+    }
+    builtin = app_from_name(name);
+    if (builtin >= 0) {
+        text_copy(entry, name, entry_max);
+        return builtin;
+    }
+    return -1;
+}
+
 bool shell_run_app(const char *name)
 {
-    int index = app_from_name(name);
+    char entry[LAUNCHER_ENTRY_MAX];
+    int builtin = shell_launcher_target(name, entry, (int)sizeof(entry));
 
-    if (index < 0) {
+    if (builtin == -2) {
+        terminal_puts("open: '");
+        terminal_puts(name);
+        terminal_puts("': bytecode apps are not wired up yet\n");
+        terminal_error();
+        return false;
+    }
+    if (builtin < 0) {
         terminal_puts("open: unknown application '");
         terminal_puts(name);
         terminal_puts("'\n");
         terminal_error();
         return false;
     }
-    wm_launch_app((enum app_id)index);
+    wm_launch_app((enum app_id)builtin);
     return true;
+}
+
+static void cmd_which(char **tokens, int count)
+{
+    if (count < 2) {
+        terminal_puts("which: missing program name\n");
+        terminal_error();
+        return;
+    }
+    for (int index = 1; index < count; ++index) {
+        int slot = launcher_resolve(tokens[index]);
+
+        if (slot >= 0) {
+            const struct launcher *item = launcher_at(slot);
+
+            terminal_puts(tokens[index]);
+            terminal_puts(" -> ");
+            terminal_puts(item->path);
+            terminal_puts(" (");
+            terminal_puts(item->kind);
+            if (item->entry[0] != 0) {
+                terminal_puts(" ");
+                terminal_puts(item->entry);
+            }
+            terminal_puts(")\n");
+        } else {
+            terminal_puts(tokens[index]);
+            terminal_puts(": not found in path\n");
+        }
+    }
+}
+
+static void cmd_launchers(void)
+{
+    int total = launcher_count();
+
+    terminal_puts("launchers from /bin\n");
+    if (total == 0) {
+        terminal_puts("  (none - filesystem is empty)\n");
+        return;
+    }
+    for (int index = 0; index < total; ++index) {
+        const struct launcher *item = launcher_at(index);
+
+        terminal_puts("  ");
+        terminal_puts(item->file);
+        terminal_puts("  title=");
+        terminal_puts(item->title);
+        terminal_puts("  kind=");
+        terminal_puts(item->kind);
+        if (item->entry[0] != 0) {
+            terminal_puts("  entry=");
+            terminal_puts(item->entry);
+        }
+        terminal_puts("\n");
+    }
 }
 
 void shell_execute(const char *line)
@@ -1212,6 +1298,10 @@ void shell_execute(const char *line)
         terminal_puts("bench: measured ");
         terminal_puts(shell_u32_to_text_scratch(rounds));
         terminal_puts(" full composite frames (cycles in serial log)\n");
+    } else if (text_equal(tokens[0], "which")) {
+        cmd_which(tokens, count);
+    } else if (text_equal(tokens[0], "launchers")) {
+        cmd_launchers();
     } else if (text_equal(tokens[0], "dumpmem")) {
         cmd_dumpmem(tokens, count);
     } else if (text_equal(tokens[0], "clear")) {
