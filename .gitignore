@@ -1,0 +1,4 @@
+build/
+klye.iso
+*.o
+*.log
