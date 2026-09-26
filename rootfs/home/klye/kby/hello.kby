@@ -1,0 +1,11 @@
+# hello.kby - the smallest useful Klye bytecode program
+.pushstr "hello from klye bytecode"
+.println
+.pushstr "6 * 7 = "
+.print
+.push8 6
+.push8 7
+.mul
+.num
+.println
+.halt

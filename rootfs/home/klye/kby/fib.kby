@@ -1,0 +1,40 @@
+# fib.kby - recursive fibonacci in Klye bytecode
+# The argument arrives on the operand stack.  @fib copies it into its own
+# frame-local var 0, so recursive activations never share state.
+# The result is left on the operand stack.
+.pushstr "fib(12) = "
+.print
+.push8 12
+.call @fib
+.num
+.println
+.halt
+
+@fib
+# on entry the stack holds n; stash it in this frame's var 0
+.store 0
+# base case: if n < 2 return n
+.push8 2
+.load 0
+.cmp
+.jnz @base
+# a = fib(n - 1)
+.load 0
+.push8 1
+.sub
+.call @fib
+.store 1
+# b = fib(n - 2)
+.load 0
+.push8 2
+.sub
+.call @fib
+.store 2
+# return a + b
+.load 1
+.load 2
+.add
+.ret
+@base
+.load 0
+.ret

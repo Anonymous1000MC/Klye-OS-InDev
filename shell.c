@@ -6,6 +6,7 @@
 #include "gfx.h"
 #include "input.h"
 #include "io.h"
+#include "kby.h"
 #include "launcher.h"
 #include "kernel.h"
 #include "scheduler.h"
@@ -280,6 +281,7 @@ static void cmd_help(void)
     shell_row("neofetch", "system summary", 14);
     shell_row("reboot", "restart the machine", 14);
     shell_row("bench [N]", "measure compositor speed", 14);
+    shell_row("kbyrun PROG", "run a KBY bytecode program", 14);
     shell_row("which NAME", "resolve from /bin", 14);
     shell_row("launchers", "list /bin launchers", 14);
     shell_row("dumpmem [KB] [MB]", "fill memory, then panic", 14);
@@ -947,6 +949,85 @@ static void cmd_echo(char **tokens, int count)
     }
 }
 
+static void shell_basename(char *out, int max, const char *path)
+{
+    int last = 0;
+    int length = 0;
+
+    for (int index = 0; path[index] != 0; ++index) {
+        if (path[index] == '/' || path[index] == '\\') {
+            last = index + 1;
+        }
+    }
+    while (path[last + length] != 0 && length < max - 1) {
+        out[length] = path[last + length];
+        ++length;
+    }
+    out[length] = 0;
+}
+
+static void cmd_kbyrun(char **tokens, int count)
+{
+    char resolved[VFS_PATH_MAX];
+    static uint8_t image[KBY_MAX_CODE];
+    char name[KBY_NAME_MAX];
+    struct kby_app *app;
+    int length;
+    int node;
+
+    if (count < 2) {
+        terminal_puts("kbyrun: missing program path\n");
+        terminal_error();
+        return;
+    }
+    vfs_absolute_of(tokens[1], state.cwd, resolved, (int)sizeof(resolved));
+    node = vfs_resolve(resolved, state.cwd);
+    if (node <= 0) {
+        terminal_puts("kbyrun: ");
+        terminal_puts(resolved);
+        terminal_puts(": no such file\n");
+        terminal_error();
+        return;
+    }
+    if (vfs_size((uint32_t)node) > (uint32_t)sizeof(image)) {
+        terminal_puts("kbyrun: program is too large\n");
+        terminal_error();
+        return;
+    }
+    length = vfs_read(resolved, (char *)image, (uint32_t)sizeof(image));
+    if (length <= 0) {
+        terminal_puts("kbyrun: cannot read program\n");
+        terminal_error();
+        return;
+    }
+    shell_basename(name, (int)sizeof(name), tokens[1]);
+    app = kby_load(name, image, (uint32_t)length);
+    if (app == 0) {
+        terminal_puts("kbyrun: ");
+        terminal_puts(kby_last_error() != 0 ? kby_last_error() : "load failed");
+        terminal_puts("\n");
+        terminal_error();
+        return;
+    }
+    while (kby_app_loaded(app)) {
+        kby_run(app, KBY_BUDGET);
+        kby_flush_output(app);
+    }
+    kby_flush_output(app);
+    terminal_puts("kbyrun: ");
+    terminal_puts(name);
+    terminal_puts(" steps ");
+    terminal_printf_number((uint64_t)kby_app_steps(app));
+    terminal_puts(", result ");
+    terminal_printf_number((uint64_t)kby_app_result(app));
+    if (kby_error(app) != 0) {
+        terminal_puts(", stopped: ");
+        terminal_puts(kby_error(app));
+    }
+    terminal_puts("\n");
+    kby_unload(app);
+}
+
 static char dumpmem_message[128];
 
 static int dumpmem_text(char *destination, int at, const char *text)
@@ -1298,6 +1379,8 @@ void shell_execute(const char *line)
         terminal_puts("bench: measured ");
         terminal_puts(shell_u32_to_text_scratch(rounds));
         terminal_puts(" full composite frames (cycles in serial log)\n");
+    } else if (text_equal(tokens[0], "kbyrun")) {
+        cmd_kbyrun(tokens, count);
     } else if (text_equal(tokens[0], "which")) {
         cmd_which(tokens, count);
     } else if (text_equal(tokens[0], "launchers")) {

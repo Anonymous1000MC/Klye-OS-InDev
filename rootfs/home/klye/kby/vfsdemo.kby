@@ -1,0 +1,19 @@
+# vfsdemo.kby - read real files out of the filesystem
+.pushstr "motd: "
+.print
+.pushstr "/etc/motd"
+.vfs_read
+.println
+.pushstr "todo.txt size: "
+.print
+.pushstr "/home/klye/todo.txt"
+.vfs_size
+.num
+.println
+.pushstr "/nope exists: "
+.print
+.pushstr "/nope"
+.vfs_exists
+.num
+.println
+.halt
