@@ -21,13 +21,20 @@ LDFLAGS := -nostdlib -no-pie -Wl,-T,linker.ld -Wl,--gc-sections \
            -Wl,-z,max-page-size=0x1000 -Wl,-z,noexecstack
 NASMFLAGS := -f elf64 -g -F dwarf
 
+HOST_CC ?= gcc
+HOST_CFLAGS := -std=c11 -O2 -Wall -Wextra
+ROOTFS := rootfs
+TOOLS := $(BUILD_DIR)/tools
+VFS_IMAGE := $(BUILD_DIR)/vfs_image.c
+
 C_SOURCES := kernel.c scheduler.c mem.c gfx.c font.c input.c vfs.c apps.c shell.c wm.c gui.c
 ASM_SOURCES := interrupts.S context.S
 OBJECTS := $(addprefix $(BUILD_DIR)/,$(C_SOURCES:.c=.o)) \
            $(addprefix $(BUILD_DIR)/,$(ASM_SOURCES:.S=.o)) \
+           $(BUILD_DIR)/vfs_image.o \
            $(BUILD_DIR)/boot.o
 
-.PHONY: all iso run clean
+.PHONY: all iso run clean tools rootfs
 
 all: $(TARGET)
 
@@ -35,6 +42,20 @@ iso: $(TARGET)
 
 $(BUILD_DIR):
 	mkdir -p $@
+
+$(TOOLS):
+	mkdir -p $@
+
+tools: $(BUILD_DIR)/mkvfs
+
+$(BUILD_DIR)/mkvfs: tools/mkvfs.c | $(TOOLS)
+	$(HOST_CC) $(HOST_CFLAGS) -o $@ $<
+
+$(VFS_IMAGE): $(BUILD_DIR)/mkvfs $(shell find $(ROOTFS) -type f 2>/dev/null)
+	$(BUILD_DIR)/mkvfs $(ROOTFS) $@
+
+$(BUILD_DIR)/vfs_image.o: $(VFS_IMAGE)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 $(ISO_DIR)/boot/grub:
 	mkdir -p $@

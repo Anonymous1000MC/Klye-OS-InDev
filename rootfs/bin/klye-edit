@@ -1,0 +1,5 @@
+# klye launcher record
+name = editor
+title = Text Editor
+kind = builtin
+icon = 1

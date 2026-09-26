@@ -1,0 +1,10 @@
+[x] boot loader
+[x] memory map
+[x] PS/2 mouse
+[x] PS/2 keyboard
+[x] compositor
+[x] dock
+[x] vfs image from host
+[ ] network stack
+[ ] sound
+[ ] virtio-gpu

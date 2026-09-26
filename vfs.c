@@ -389,9 +389,82 @@ void vfs_format(void)
     vfs_ready = true;
 }
 
+extern const uint32_t vfs_image_magic;
+extern const uint32_t vfs_image_count;
+extern const uint32_t vfs_image_bytes;
+extern const unsigned char vfs_image_data[];
+
+#define VFS_IMAGE_MAGIC 0x3146564BU
+#define VFS_IMAGE_KIND_DIR 0U
+#define VFS_IMAGE_KIND_FILE 1U
+
+static bool vfs_load_image(void)
+{
+    const unsigned char *cursor = vfs_image_data;
+    uint32_t total = vfs_image_bytes;
+    uint32_t count = vfs_image_count;
+    uint32_t index;
+
+    if (vfs_image_magic != VFS_IMAGE_MAGIC) {
+        return false;
+    }
+    for (index = 0; index < count; ++index) {
+        uint32_t path_len;
+        uint32_t body_len;
+        uint32_t kind;
+        char path[VFS_PATH_MAX];
+
+        if ((uint32_t)(vfs_image_data + total - cursor) < 8U) {
+            return false;
+        }
+        path_len = (uint32_t)cursor[0] | ((uint32_t)cursor[1] << 8);
+        body_len = (uint32_t)cursor[2] | ((uint32_t)cursor[3] << 8);
+        kind = cursor[4];
+        cursor += 8;
+        if ((uint32_t)(vfs_image_data + total - cursor) < path_len + body_len) {
+            return false;
+        }
+        if (path_len == 0U || path_len >= sizeof(path)) {
+            return false;
+        }
+        __builtin_memcpy(path, cursor, (size_t)path_len);
+        path[path_len] = 0;
+        cursor += path_len;
+        if (vfs_streq(path, "/")) {
+            cursor += body_len;
+            continue;
+        }
+        if (kind == VFS_IMAGE_KIND_DIR) {
+            if (vfs_create(path, true) < 0) {
+                return false;
+            }
+        } else {
+            int node = vfs_create(path, false);
+
+            if (node < 0) {
+                return false;
+            }
+            if (body_len != 0U) {
+                char body[VFS_BODY_MAX];
+
+                if (body_len > sizeof(body)) {
+                    return false;
+                }
+                __builtin_memcpy(body, cursor, (size_t)body_len);
+                (void)vfs_write(path, body, body_len);
+            }
+        }
+        cursor += body_len;
+    }
+    return true;
+}
+
 bool vfs_mount(void)
 {
     vfs_format();
+    if (vfs_load_image()) {
+        return true;
+    }
     vfs_seed_directory("/bin");
     vfs_seed_directory("/etc");
     vfs_seed_directory("/home");
