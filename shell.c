@@ -278,6 +278,8 @@ static void cmd_help(void)
     shell_row("uptime", "time since boot", 14);
     shell_row("neofetch", "system summary", 14);
     shell_row("reboot", "restart the machine", 14);
+    shell_row("bench [N]", "measure compositor speed", 14);
+    shell_row("dumpmem [KB] [MB]", "fill memory, then panic", 14);
     terminal_puts("\n");
     shell_row("pwd", "print directory", 14);
     shell_row("cd DIR", "change directory", 14);
@@ -942,6 +944,113 @@ static void cmd_echo(char **tokens, int count)
     }
 }
 
+static char dumpmem_message[128];
+
+static int dumpmem_text(char *destination, int at, const char *text)
+{
+    int index = 0;
+
+    while (text[index] != 0) {
+        destination[at + index] = text[index];
+        ++index;
+    }
+    destination[at + index] = 0;
+    return at + index;
+}
+
+static int dumpmem_number(char *destination, int at, uint32_t value)
+{
+    return at + shell_u32_to_text(destination + at, value);
+}
+
+static void dumpmem_fill(uint8_t *bytes, uint32_t length, uint8_t seed)
+{
+    for (uint32_t index = 0; index < length; ++index) {
+        bytes[index] = (uint8_t)(seed + (index & 0x1FU));
+    }
+}
+
+static bool dumpmem_verify(const uint8_t *bytes, uint32_t length, uint8_t seed)
+{
+    for (uint32_t index = 0; index < length; ++index) {
+        if (bytes[index] != (uint8_t)(seed + (index & 0x1FU))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void cmd_dumpmem(char **tokens, int count)
+{
+    uint32_t block = 64U * 1024U;
+    uint32_t limit = 0U;
+    uint32_t total = 0U;
+    uint32_t blocks = 0U;
+    uint8_t seed = 0U;
+    int at;
+
+    if (count > 1) {
+        block = (uint32_t)shell_atoi_value(tokens[1]) * 1024U;
+        if (block < 4U * 1024U) {
+            block = 4U * 1024U;
+        }
+        if (block > 1024U * 1024U) {
+            block = 1024U * 1024U;
+        }
+    }
+    if (count > 2) {
+        limit = (uint32_t)shell_atoi_value(tokens[2]) * 1024U * 1024U;
+    }
+
+    terminal_puts("dumpmem: block ");
+    terminal_printf_number((uint64_t)block / 1024U);
+    terminal_puts(" KiB, arena free ");
+    terminal_printf_number((uint64_t)gfx_frame_bytes_free() / 1024U);
+    terminal_puts(" KiB\n");
+
+    for (;;) {
+        uint8_t *chunk = (uint8_t *)gfx_alloc(block);
+
+        if (chunk == 0) {
+            break;
+        }
+        dumpmem_fill(chunk, block, seed);
+        if (dumpmem_verify(chunk, block, seed) == false) {
+            at = dumpmem_text(dumpmem_message, 0,
+                              "dumpmem: pattern check failed at ");
+            at = dumpmem_number(dumpmem_message, at, total);
+            dumpmem_text(dumpmem_message, at, " bytes");
+            panic(dumpmem_message);
+        }
+        total += block;
+        blocks++;
+        seed = (uint8_t)(seed + 1U);
+        if ((blocks % 16U) == 0U) {
+            terminal_puts("  allocated ");
+            terminal_printf_number((uint64_t)total / 1024U);
+            terminal_puts(" KiB in ");
+            terminal_printf_number((uint64_t)blocks);
+            terminal_puts(" blocks\n");
+        }
+        if (limit != 0U && total >= limit) {
+            terminal_puts("dumpmem: reached requested limit, stopping\n");
+            terminal_puts("  total ");
+            terminal_printf_number((uint64_t)total / 1024U);
+            terminal_puts(" KiB, free now ");
+            terminal_printf_number((uint64_t)gfx_frame_bytes_free() / 1024U);
+            terminal_puts(" KiB\n");
+            return;
+        }
+    }
+
+    at = dumpmem_text(dumpmem_message, 0, "dumpmem: out of memory after ");
+    at = dumpmem_number(dumpmem_message, at, total / 1024U);
+    at = dumpmem_text(dumpmem_message, at, " KiB in ");
+    at = dumpmem_number(dumpmem_message, at, blocks);
+    dumpmem_text(dumpmem_message, at, " blocks");
+    panic(dumpmem_message);
+}
+
 static void cmd_touch(char **tokens, int count)
 {
     for (int index = 1; index < count; ++index) {
@@ -1103,6 +1212,8 @@ void shell_execute(const char *line)
         terminal_puts("bench: measured ");
         terminal_puts(shell_u32_to_text_scratch(rounds));
         terminal_puts(" full composite frames (cycles in serial log)\n");
+    } else if (text_equal(tokens[0], "dumpmem")) {
+        cmd_dumpmem(tokens, count);
     } else if (text_equal(tokens[0], "clear")) {
         terminal_clear();
     } else if (text_equal(tokens[0], "echo")) {
