@@ -412,15 +412,6 @@ __attribute__((noreturn)) void halt_forever(void)
     }
 }
 
-__attribute__((noreturn)) void panic(const char *message)
-{
-    __asm__ volatile("cli");
-    serial_write("Klye OS panic: ");
-    serial_write(message);
-    serial_write("\n");
-    halt_forever();
-}
-
 static uint64_t read_control_register_2(void)
 {
     uint64_t value;
@@ -575,10 +566,7 @@ void interrupt_dispatch(struct interrupt_registers *registers,
     if (vector < 32) {
         capture_fault(registers, vector);
         report_exception(registers, vector);
-        __asm__ volatile("cli");
-        for (;;) {
-            __asm__ volatile("hlt");
-        }
+        panic(exception_name(vector));
     }
 
     if (vector == 32) {
@@ -805,4 +793,119 @@ void kernel_main(uint64_t framebuffer_address, uint32_t pitch,
     for (;;) {
         __asm__ volatile("hlt");
     }
+}
+#define PAGE_FAULT_PRESENT 0x01U
+#define PAGE_FAULT_WRITE 0x02U
+#define PAGE_FAULT_USER 0x04U
+#define PAGE_FAULT_RESERVED 0x08U
+#define PAGE_FAULT_FETCH 0x10U
+#define PAGE_FAULT_PROTECTION 0x01U
+
+static const char *fault_cause_text(void)
+{
+    if (last_fault.vector == 14U) {
+        if ((last_fault.error & PAGE_FAULT_PRESENT) == 0U) {
+            return "page fault: accessed memory that is not mapped";
+        }
+        if ((last_fault.error & PAGE_FAULT_WRITE) != 0U) {
+            return "page fault: wrote to read-only memory";
+        }
+        if ((last_fault.error & PAGE_FAULT_FETCH) != 0U) {
+            return "page fault: executed code from non-executable memory";
+        }
+        return "page fault: violated memory protection rules";
+    }
+    if (last_fault.vector == 13U) {
+        if ((last_fault.error & 0x0010U) != 0U) {
+            return "general protection fault: executed an invalid opcode";
+        }
+        if ((last_fault.error & 0x0008U) != 0U) {
+            return "general protection fault: descriptor table entry "
+                   "was not readable";
+        }
+        if ((last_fault.error & 0x0004U) != 0U) {
+            return "general protection fault: attempted to write a "
+                   "read-only segment";
+        }
+        if ((last_fault.error & 0x0002U) != 0U) {
+            return "general protection fault: accessed a null selector";
+        }
+        if ((last_fault.error & 0x0001U) != 0U) {
+            return "general protection fault: memory protection violation";
+        }
+        return "general protection fault: privileged operation while "
+               "running at user level";
+    }
+    if (last_fault.vector == 8U) {
+        return "double fault: fault while handling another fault, "
+               "often a bad stack or gate";
+    }
+    if (last_fault.vector == 6U) {
+        return "invalid opcode: cpu could not decode the instruction";
+    }
+    if (last_fault.vector == 0U) {
+        return "divide error: division by zero or divide overflow";
+    }
+    if (last_fault.vector == 21U) {
+        return "control protection exception: branch target was not "
+               "an allowed control flow target";
+    }
+    if (last_fault.cr2 != 0U) {
+        return "cpu exception while accessing a faulting address";
+    }
+    return "cpu exception during kernel execution";
+}
+
+__attribute__((noreturn)) void panic(const char *message)
+{
+    __asm__ volatile("cli");
+    serial_write("\n*** KERNEL PANIC ***\nTrigger: ");
+    serial_write(message != 0 ? message : "unspecified failure");
+    serial_write("\n\nDiagnosis\n");
+    if (last_fault.captured != 0U) {
+        const char *cause = fault_cause_text();
+
+        serial_write("  detected cause : ");
+        serial_write(cause);
+        serial_write("\n  exception      : ");
+        serial_write(exception_name(last_fault.vector));
+        serial_write(" (vector ");
+        serial_hex(last_fault.vector);
+        serial_write(")\n  faulting rip   : ");
+        serial_hex(last_fault.rip);
+        serial_write("\n  fault address  : ");
+        serial_hex(last_fault.cr2);
+        serial_write("\n  error code     : ");
+        serial_hex(last_fault.error);
+        serial_write("\n  faulting task  : ");
+        serial_hex(last_fault.task_index);
+        serial_write("\n");
+        if (last_fault.nested != 0U) {
+            serial_write("  nested faults  : ");
+            serial_hex((uint64_t)last_fault.nested);
+            serial_write("\n");
+        }
+    } else {
+        serial_write("  detected cause : software invariant failed, "
+                     "no cpu exception was recorded\n");
+    }
+    if (console_enabled) {
+        console_clear();
+        console_write("*** KERNEL PANIC ***\n");
+        console_write(message != 0 ? message : "unspecified failure");
+        console_write("\n\ndiagnosis: ");
+        console_write(last_fault.captured != 0U ? fault_cause_text()
+                                               : "software invariant failed");
+        if (last_fault.captured != 0U) {
+            console_write("\nexception: ");
+            console_write(exception_name(last_fault.vector));
+            console_number("\nfaulting rip: 0x", last_fault.rip, "");
+            console_number("\nfault address: 0x", last_fault.cr2, "");
+            console_number("\nerror code: 0x", last_fault.error, "");
+        }
+        console_write("\n\nsystem halted");
+        console_flush();
+    }
+    serial_write("system halted\n");
+    halt_forever();
 }
