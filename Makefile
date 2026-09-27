@@ -27,7 +27,7 @@ ROOTFS := rootfs
 TOOLS := $(BUILD_DIR)/tools
 VFS_IMAGE := $(BUILD_DIR)/vfs_image.c
 
-C_SOURCES := kernel.c scheduler.c mem.c gfx.c font.c input.c vfs.c launcher.c kby.c apps.c shell.c wm.c gui.c
+C_SOURCES := kernel.c scheduler.c mem.c gfx.c font.c input.c vfs.c launcher.c kby.c kas.c apps.c shell.c wm.c gui.c
 ASM_SOURCES := interrupts.S context.S
 OBJECTS := $(addprefix $(BUILD_DIR)/,$(C_SOURCES:.c=.o)) \
            $(addprefix $(BUILD_DIR)/,$(ASM_SOURCES:.S=.o)) \
@@ -51,8 +51,8 @@ tools: $(BUILD_DIR)/mkvfs $(BUILD_DIR)/kbasm
 $(BUILD_DIR)/mkvfs: tools/mkvfs.c | $(TOOLS)
 	$(HOST_CC) $(HOST_CFLAGS) -o $@ $<
 
-$(BUILD_DIR)/kbasm: tools/kbasm.c | $(TOOLS)
-	$(HOST_CC) $(HOST_CFLAGS) -o $@ $<
+$(BUILD_DIR)/kbasm: tools/kbasm.c include/kby_ops.h | $(TOOLS)
+	$(HOST_CC) $(HOST_CFLAGS) -Iinclude -o $@ $<
 
 # assemble every .kby source into a sibling .kbin before imaging
 $(ROOTFS)/%.kbin: $(ROOTFS)/%.kby $(BUILD_DIR)/kbasm

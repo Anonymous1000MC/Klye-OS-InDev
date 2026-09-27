@@ -6,6 +6,7 @@
  */
 #include <stdint.h>
 #include <stdio.h>
+#include "kby_ops.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -132,61 +133,6 @@ static long lookup_label(const char *name)
 }
 
 /* has_arg: 0 none, 1 eight, 2 sixteen, 3 thirtytwo, 4 string, 5 label */
-struct opdef {
-    const char *name;
-    int has_arg;
-    unsigned char byte;
-};
-
-static const struct opdef opcodes[] = {
-    { ".nop", 0, 0x00 },
-    { ".push8", 1, 0x01 },
-    { ".push32", 3, 0x02 },
-    { ".pushstr", 4, 0x03 },
-    { ".pop", 0, 0x04 },
-    { ".dup", 0, 0x05 },
-    { ".load", 1, 0x06 },
-    { ".store", 1, 0x07 },
-    { ".add", 0, 0x08 },
-    { ".sub", 0, 0x09 },
-    { ".mul", 0, 0x0A },
-    { ".div", 0, 0x0B },
-    { ".mod", 0, 0x0C },
-    { ".cmp", 0, 0x65 },
-    { ".jmp", 5, 0x0D },
-    { ".jz", 5, 0x0E },
-    { ".jnz", 5, 0x0F },
-    { ".call", 5, 0x10 },
-    { ".ret", 0, 0x11 },
-    { ".halt", 0, 0x12 },
-    { ".print", 0, 0x20 },
-    { ".println", 0, 0x21 },
-    { ".clear", 0, 0x30 },
-    { ".rect", 7, 0x31 },
-    { ".rounded", 9, 0x32 },
-    { ".border", 9, 0x33 },
-    { ".pixel", 0, 0x34 },
-    { ".circle", 0, 0x35 },
-    { ".line", 0, 0x36 },
-    { ".text", 8, 0x37 },
-    { ".textc", 8, 0x38 },
-    { ".vfs_exists", 0, 0x50 },
-    { ".vfs_size", 0, 0x51 },
-    { ".vfs_read", 0, 0x52 },
-    { ".vfs_write", 0, 0x53 },
-    { ".vfs_append", 0, 0x54 },
-    { ".ticks", 0, 0x60 },
-    { ".key_poll", 0, 0x61 },
-    { ".mouse_x", 0, 0x62 },
-    { ".mouse_y", 0, 0x63 },
-    { ".mouse_down", 0, 0x64 },
-    { ".frame", 0, 0x67 },
-    { ".win_open", 8, 0x68 },
-    { ".win_close", 0, 0x69 },
-    { ".vsync", 0, 0x6A },
-    { ".num", 0, 0x66 },
-    { 0, 0, 0 }
-};
 
 static char *trim(char *text)
 {
@@ -263,9 +209,9 @@ static void assemble_line(char *line)
         snprintf(rest, sizeof(rest), "%s", tail);
     }
 
-    for (index = 0; opcodes[index].name != 0; ++index) {
-        if (strcmp(opcodes[index].name, name) == 0) {
-            def = &opcodes[index];
+    for (index = 0; kby_opcodes[index].name != 0; ++index) {
+        if (strcmp(kby_opcodes[index].name, name) == 0) {
+            def = &kby_opcodes[index];
             break;
         }
     }

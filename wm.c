@@ -7,6 +7,7 @@
 #include "gfx.h"
 #include "input.h"
 #include "kby.h"
+#include "launcher.h"
 #include "kernel.h"
 #include "shell.h"
 #include "theme.h"
@@ -59,11 +60,18 @@ struct wm_window {
     int z;
 };
 
+#define DOCK_SLOT_APP 0
+#define DOCK_SLOT_SEPARATOR 1
+#define DOCK_SLOT_LAUNCHER 2
+
 struct dock_slot {
     int x;
     int width;
     int app;
     int separator;
+    int kind;
+    int index;
+    int launcher;
 };
 
 struct wm_state {
@@ -90,7 +98,7 @@ struct wm_state {
     int dock_origin_x;
     int dock_width;
     int dock_y;
-    struct dock_slot slots[APP_COUNT + 2];
+    struct dock_slot slots[APP_COUNT + LAUNCHER_MAX + 4];
     int slot_count;
     uint64_t last_frame_q16;
     uint32_t frame_count;
@@ -694,6 +702,13 @@ static void layout_dock(void)
         total += (THEME_DOCK_ICON * wm.dock_scale[index]) / 256 +
                  THEME_DOCK_ICON_GAP;
     }
+    if (count != 0 && launcher_count() > 0) {
+        total += THEME_DOCK_SEPARATOR_GAP;
+    }
+    for (int index = 0; index < launcher_count(); ++index) {
+        total += (THEME_DOCK_ICON * wm.dock_scale[APP_COUNT - 1]) / 256 +
+                 THEME_DOCK_ICON_GAP;
+    }
     total -= THEME_DOCK_ICON_GAP;
     wm.dock_width = total;
     wm.dock_origin_x = (int)gfx_width() / 2 - total / 2;
@@ -714,8 +729,38 @@ static void layout_dock(void)
                 slot->width = size;
                 slot->app = index;
                 slot->separator = 0;
+                slot->kind = DOCK_SLOT_APP;
+                slot->index = wm.slot_count - 1;
+                slot->launcher = -1;
                 cursor += size + THEME_DOCK_ICON_GAP;
             }
+        }
+        if (launcher_count() > 0) {
+            struct dock_slot *slot = &wm.slots[wm.slot_count++];
+            int size = (THEME_DOCK_ICON * wm.dock_scale[APP_COUNT - 1]) / 256;
+
+            slot->x = cursor;
+            slot->width = THEME_DOCK_SEPARATOR_GAP;
+            slot->app = -1;
+            slot->separator = 1;
+            slot->kind = DOCK_SLOT_SEPARATOR;
+            slot->index = wm.slot_count - 1;
+            slot->launcher = -1;
+            cursor += THEME_DOCK_SEPARATOR_GAP;
+            (void)size;
+        }
+        for (int index = 0; index < launcher_count(); ++index) {
+            int size = (THEME_DOCK_ICON * wm.dock_scale[APP_COUNT - 1]) / 256;
+            struct dock_slot *slot = &wm.slots[wm.slot_count++];
+
+            slot->x = cursor;
+            slot->width = size;
+            slot->app = -1;
+            slot->separator = 0;
+            slot->kind = DOCK_SLOT_LAUNCHER;
+            slot->index = wm.slot_count - 1;
+            slot->launcher = index;
+            cursor += size + THEME_DOCK_ICON_GAP;
         }
     }
 }
@@ -733,7 +778,7 @@ static void update_dock_animation(void)
             wm.mouse_x < slot->x + slot->width + 6 &&
             wm.mouse_y >= wm.dock_y &&
             wm.mouse_y < (int)gfx_height() - THEME_DOCK_MARGIN) {
-            wm.dock_hover = slot->app;
+            wm.dock_hover = slot->index;
         }
     }
     if (wm.dock_hover != previous_hover) {
@@ -768,6 +813,30 @@ static void update_dock_animation(void)
     }
 }
 
+static void draw_launcher_icon(struct gfx_surface *surface,
+                               const struct launcher *item, int x, int y,
+                               int size)
+{
+    int radius = size / 5;
+    char initial[2];
+
+    gfx_rounded_rect(surface, x, y, size, size, radius,
+                     PIXEL_RGB(0x2C, 0x36, 0x4C));
+    gfx_rounded_border(surface, x, y, size, size, radius, 1,
+                       PIXEL_RGB(0x4A, 0x57, 0x73));
+    if (item == 0) {
+        return;
+    }
+    if (item->icon >= 0) {
+        app_draw_icon(surface, (enum app_id)item->icon, x, y, size);
+        return;
+    }
+    initial[0] = item->title[0] != 0 ? item->title[0] : '?';
+    initial[1] = 0;
+    font_draw_centered(surface, x + size / 2, y + size / 2 + 6, initial,
+                       THEME_TEXT_PRIMARY, 2);
+}
+
 static void draw_dock(struct gfx_surface *surface)
 {
     int height;
@@ -789,8 +858,31 @@ static void draw_dock(struct gfx_surface *surface)
         int size = slot->width;
         int top = y + (height - size) / 2;
 
+        if (slot->kind == DOCK_SLOT_SEPARATOR) {
+            gfx_fill(surface, slot->x + slot->width / 2 - 1, y + 8, 2,
+                     height - 16, THEME_DOCK_BORDER);
+            continue;
+        }
+        if (slot->kind == DOCK_SLOT_LAUNCHER) {
+            const struct launcher *item = launcher_at(slot->launcher);
+            const char *label = item != 0 ? item->title : "?";
+
+            draw_launcher_icon(surface, item, slot->x, top, size);
+            if (wm.dock_hover == slot->index) {
+                int label_width = font_text_width(label, 1);
+                int label_x = slot->x + size / 2 - label_width / 2;
+                int label_y = y - 26;
+
+                gfx_rounded_rect(surface, label_x - 9, label_y - 9,
+                                 label_width + 18, 18, 8,
+                                 PIXEL_RGB(0x1B, 0x22, 0x33));
+                font_draw_centered(surface, slot->x + size / 2, label_y + 4,
+                                   label, THEME_TEXT_ON_DARK, 1);
+            }
+            continue;
+        }
         app_draw_icon(surface, (enum app_id)slot->app, slot->x, top, size);
-        if (wm.dock_hover == slot->app) {
+        if (wm.dock_hover == slot->index) {
             int label_width = font_text_width(app_title((enum app_id)slot->app),
                                               1);
             int label_x = slot->x + size / 2 - label_width / 2;
@@ -2046,10 +2138,22 @@ static void handle_mouse_press(void)
     }
     slot = dock_slot_at(x, y);
     if (slot >= 0) {
-        int app = wm.slots[slot].app;
+        const struct dock_slot *entry = &wm.slots[slot];
 
-        wm.heartbeat[app] = pit_ticks();
-        wm_launch_app((enum app_id)app);
+        if (entry->kind == DOCK_SLOT_LAUNCHER) {
+            const struct launcher *item = launcher_at(entry->launcher);
+
+            if (item != 0) {
+                shell_run_app(item->file);
+            }
+            return;
+        }
+        if (entry->kind == DOCK_SLOT_APP) {
+            int app = entry->app;
+
+            wm.heartbeat[app] = pit_ticks();
+            wm_launch_app((enum app_id)app);
+        }
         return;
     }
     icon = desktop_icon_at(x, y);

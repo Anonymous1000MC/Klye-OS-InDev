@@ -7,6 +7,7 @@
 #include "input.h"
 #include "io.h"
 #include "kby.h"
+#include "kas.h"
 #include "launcher.h"
 #include "kernel.h"
 #include "scheduler.h"
@@ -1340,6 +1341,288 @@ bool shell_run_app(const char *name)
     return true;
 }
 
+
+/* ---------------------------------------------------------------- kpm ---- */
+
+#define KPM_SOURCE_MAX 8192
+#define KPM_IMAGE_MAX 4096
+
+static void kpm_usage(void)
+{
+    terminal_puts("usage:\n");
+    terminal_puts("  kpm list                  installed programs\n");
+    terminal_puts("  kpm build <name>.kby      assemble and install\n");
+    terminal_puts("  kpm remove <name>         uninstall\n");
+    terminal_puts("  kpm run <name>            run an installed program\n");
+}
+
+/* copies name into out with a known suffix removed; false if absent */
+static bool kpm_stem(const char *name, const char *suffix, char *out, int max)
+{
+    int stem = text_length(name);
+    int cut = text_length(suffix);
+
+    if (stem <= cut) {
+        return false;
+    }
+    for (int index = 0; index < cut; ++index) {
+        if (name[stem - cut + index] != suffix[index]) {
+            return false;
+        }
+    }
+    stem -= cut;
+    if (stem >= max) {
+        stem = max - 1;
+    }
+    for (int index = 0; index < stem; ++index) {
+        out[index] = name[index];
+    }
+    out[stem] = 0;
+    return true;
+}
+
+/* builds "/bin/<stem>.kbin" */
+static void kpm_bin_path(const char *stem, const char *ext, char *out, int max)
+{
+    int at = 0;
+    const char *prefix = "/bin/";
+
+    for (int index = 0; prefix[index] != 0 && at < max - 1; ++index) {
+        out[at++] = prefix[index];
+    }
+    for (int index = 0; stem[index] != 0 && at < max - 1; ++index) {
+        out[at++] = stem[index];
+    }
+    for (int index = 0; ext[index] != 0 && at < max - 1; ++index) {
+        out[at++] = ext[index];
+    }
+    out[at] = 0;
+}
+
+static void kpm_report(const char *what, const char *detail)
+{
+    terminal_puts("kpm ");
+    terminal_puts(what);
+    terminal_puts(": ");
+    terminal_puts(detail);
+    terminal_puts("\n");
+    terminal_error();
+}
+
+static void kpm_list(void)
+{
+    int found = 0;
+
+    for (int index = 0; index < launcher_count(); ++index) {
+        const struct launcher *item = launcher_at(index);
+
+        if (item == 0 || item->is_record == false) {
+            continue;
+        }
+        terminal_puts("  ");
+        terminal_puts(item->file);
+        terminal_puts("  ");
+        terminal_puts(item->title);
+        terminal_puts("  (");
+        terminal_puts(item->kind);
+        terminal_puts(")\n");
+        ++found;
+    }
+    if (found == 0) {
+        terminal_puts("  nothing installed\n");
+    }
+}
+
+static bool kpm_build(const char *name)
+{
+    static char source[KPM_SOURCE_MAX];
+    static uint8_t image[KPM_IMAGE_MAX];
+    char source_path[VFS_PATH_MAX];
+    char binary_path[VFS_PATH_MAX];
+    char record_path[VFS_PATH_MAX];
+    char record[LAUNCHER_NAME_MAX];
+    char stem[LAUNCHER_NAME_MAX];
+    char line[LAUNCHER_NAME_MAX * 2 + 64];
+    const char *why = 0;
+    int length;
+    int bytes = 0;
+    int at = 0;
+
+    if (kpm_stem(name, ".kby", stem, (int)sizeof(stem)) == false) {
+        kpm_report("build", "name must end in .kby");
+        return false;
+    }
+    /* look in the home directory, then in the kby source folder */
+    {
+        static const char *const dirs[2] = { "/home/klye/", "/home/klye/kby/" };
+        int found = 0;
+
+        source_path[0] = 0;
+        for (int which = 0; which < 2 && found == 0; ++which) {
+            int used = 0;
+
+            for (int index = 0; dirs[which][index] != 0; ++index) {
+                source_path[used++] = dirs[which][index];
+            }
+            for (int index = 0; name[index] != 0 &&
+                 used < (int)sizeof(source_path) - 1; ++index) {
+                source_path[used++] = name[index];
+            }
+            source_path[used] = 0;
+            if (vfs_exists(source_path) != 0) {
+                found = 1;
+            }
+        }
+    }
+    if (source_path[0] == 0) {
+        char missing[VFS_PATH_MAX];
+        int used = 0;
+        const char *home = "/home/klye/";
+
+        for (int index = 0; home[index] != 0; ++index) {
+            missing[used++] = home[index];
+        }
+        for (int index = 0; name[index] != 0 &&
+             used < (int)sizeof(missing) - 1; ++index) {
+            missing[used++] = name[index];
+        }
+        missing[used] = 0;
+        terminal_puts("kpm build: no source at ");
+        terminal_puts(missing);
+        terminal_puts("\n");
+        terminal_error();
+        return false;
+    }
+    if (vfs_exists(source_path) == false) {
+        terminal_puts("kpm build: no source at ");
+        terminal_puts(source_path);
+        terminal_puts("\n");
+        terminal_error();
+        return false;
+    }
+    length = vfs_read(source_path, source, (uint32_t)sizeof(source));
+    if (length <= 0) {
+        terminal_puts("kpm build: cannot read ");
+        terminal_puts(source_path);
+        terminal_puts("\n");
+        terminal_error();
+        return false;
+    }
+    if (kas_assemble(source, length, image, (int)sizeof(image), &bytes,
+                     &why) == false) {
+        terminal_puts("kpm build: ");
+        terminal_puts(why != 0 ? why : "assembly failed");
+        terminal_puts("\n");
+        terminal_error();
+        return false;
+    }
+    kpm_bin_path(stem, ".kbin", binary_path, (int)sizeof(binary_path));
+    if (vfs_write(binary_path, (const char *)image, (uint32_t)bytes) < 0) {
+        kpm_report("build", "cannot write the program image");
+        return false;
+    }
+    kpm_bin_path(stem, "", record_path, (int)sizeof(record_path));
+    /* build the record with sizeof literals so a length can never drift */
+    {
+        static const char title_key[] = "title=";
+        static const char kind_key[] = "\nkind=kby\nentry=";
+        static const char tail[] = ".kbin\nicon=-1\n";
+
+        text_copy(line, title_key, (int)sizeof(line));
+        at = (int)sizeof(title_key) - 1;
+        text_copy(line + at, stem, (int)sizeof(line) - at);
+        at += text_length(stem);
+        text_copy(line + at, kind_key, (int)sizeof(line) - at);
+        at += (int)sizeof(kind_key) - 1;
+        text_copy(line + at, stem, (int)sizeof(line) - at);
+        at += text_length(stem);
+        text_copy(line + at, tail, (int)sizeof(line) - at);
+        at += (int)sizeof(tail) - 1;
+        line[at] = 0;
+    }
+    if (vfs_write(record_path, line, (uint32_t)at) < 0) {
+        kpm_report("build", "cannot write the launcher record");
+        return false;
+    }
+    text_copy(record, stem, (int)sizeof(record));
+    launcher_scan();
+    terminal_puts("installed ");
+    terminal_puts(record);
+    terminal_puts(" (");
+    {
+        char digits[12];
+        int used = 0;
+        int value = bytes;
+
+        if (value == 0) {
+            digits[used++] = '0';
+        }
+        while (value > 0 && used < 11) {
+            digits[used++] = (char)('0' + value % 10);
+            value /= 10;
+        }
+        while (used > 0) {
+            char one[2];
+
+            --used;
+            one[0] = digits[used];
+            one[1] = 0;
+            terminal_puts(one);
+        }
+    }
+    terminal_puts(" bytes)\n");
+    return true;
+}
+
+static bool kpm_remove(const char *name)
+{
+    char record_path[VFS_PATH_MAX];
+    char binary_path[VFS_PATH_MAX];
+    char stem[LAUNCHER_NAME_MAX];
+
+    if (kpm_stem(name, "", stem, (int)sizeof(stem)) == false &&
+        kpm_stem(name, ".kby", stem, (int)sizeof(stem)) == false) {
+        kpm_report("remove", "bad program name");
+        return false;
+    }
+    kpm_bin_path(stem, "", record_path, (int)sizeof(record_path));
+    if (vfs_exists(record_path) == false) {
+        kpm_report("remove", "not installed");
+        return false;
+    }
+    vfs_delete(record_path);
+    kpm_bin_path(stem, ".kbin", binary_path, (int)sizeof(binary_path));
+    vfs_delete(binary_path);
+    launcher_scan();
+    terminal_puts("removed ");
+    terminal_puts(stem);
+    terminal_puts("\n");
+    return true;
+}
+
+static void cmd_kpm(char **tokens, int count)
+{
+    if (count < 2) {
+        kpm_usage();
+        return;
+    }
+    if (text_equal(tokens[1], "list") || text_equal(tokens[1], "ls")) {
+        kpm_list();
+    } else if (text_equal(tokens[1], "build") || text_equal(tokens[1], "install")) {
+        kpm_build(count > 2 ? tokens[2] : "");
+    } else if (text_equal(tokens[1], "remove") || text_equal(tokens[1], "rm")) {
+        kpm_remove(count > 2 ? tokens[2] : "");
+    } else if (text_equal(tokens[1], "run")) {
+        if (count > 2) {
+            shell_run_app(tokens[2]);
+        } else {
+            kpm_usage();
+        }
+    } else {
+        kpm_usage();
+    }
+}
+
 static void cmd_which(char **tokens, int count)
 {
     if (count < 2) {
@@ -1556,6 +1839,8 @@ void shell_execute(const char *line)
             return;
         }
         shell_run_app(argument);
+    } else if (text_equal(tokens[0], "kpm")) {
+        cmd_kpm(tokens, count);
     } else if (text_equal(tokens[0], "man") || text_equal(tokens[0], "help2")) {
         if (argument[0] == '\0') {
             terminal_puts("man: missing command name\n");

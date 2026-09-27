@@ -222,6 +222,10 @@ static int vfs_new_node(int parent, const char *name, bool directory)
         return -1;
     }
     node = &vfs_nodes[index];
+    /* wipe the whole slot: a reused node would otherwise keep the previous
+     * name's tail bytes after the terminator, which shows up in dumps and
+     * confuses anything that inspects name[] directly */
+    __builtin_memset(node, 0, sizeof(*node));
     node->used = true;
     node->is_dir = directory;
     node->parent = parent;
