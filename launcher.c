@@ -84,6 +84,7 @@ static void parse_record(struct launcher *slot, const char *body)
 
     text_take(slot->title, LAUNCHER_TITLE_MAX, slot->file);
     text_take(slot->kind, LAUNCHER_KIND_MAX, "builtin");
+    slot->is_record = false;
     slot->entry[0] = 0;
     slot->icon = -1;
 
@@ -144,6 +145,7 @@ static void parse_record(struct launcher *slot, const char *body)
             text_take(slot->title, LAUNCHER_TITLE_MAX, value);
         } else if (text_same(key, "kind")) {
             text_take(slot->kind, LAUNCHER_KIND_MAX, value);
+            slot->is_record = true;
         } else if (text_same(key, "name") || text_same(key, "entry")) {
             text_take(slot->entry, LAUNCHER_ENTRY_MAX, value);
         } else if (text_same(key, "icon")) {
@@ -162,6 +164,7 @@ void launcher_reset(void)
         launchers[index].entry[0] = 0;
         launchers[index].file[0] = 0;
         launchers[index].path[0] = 0;
+        launchers[index].is_record = false;
     }
     launcher_used = 0;
 }
@@ -209,6 +212,9 @@ void launcher_scan(void)
         text_take(slot->file, LAUNCHER_NAME_MAX, name);
         text_take(slot->path, LAUNCHER_PATH_MAX, path);
         parse_record(slot, body);
+        if (slot->is_record == false) {
+            continue;
+        }
         if (slot->entry[0] == 0) {
             text_take(slot->entry, LAUNCHER_ENTRY_MAX, name);
         }

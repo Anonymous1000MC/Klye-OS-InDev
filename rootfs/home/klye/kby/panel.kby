@@ -1,0 +1,19 @@
+# panel.kby - a small custom app window
+# draw ops take geometry inline; the colour is pushed first, one per op
+.push32 0xFF232B3D
+.rect 0 0 520 380
+.push32 0xFF6FD3FF
+.rounded 24 20 150 34 6
+.push32 0xFF10202C
+.text 44 42 "custom app"
+.push32 0xFFE8EAF0
+.text 24 90 "this window is bytecode"
+.push32 0xFFE8EAF0
+.text 24 110 "stepped by the compositor"
+.push32 0xFFE8EAF0
+.text 24 130 "under a 60 fps budget"
+.push32 0xFF8B95A8
+.text 24 330 "klye bytecode"
+.push32 0xFF8B95A8
+.text 200 330 "draws its own pixels"
+.halt

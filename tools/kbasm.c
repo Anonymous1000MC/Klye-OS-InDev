@@ -162,14 +162,14 @@ static const struct opdef opcodes[] = {
     { ".print", 0, 0x20 },
     { ".println", 0, 0x21 },
     { ".clear", 0, 0x30 },
-    { ".rect", 0, 0x31 },
-    { ".rounded", 1, 0x32 },
-    { ".border", 1, 0x33 },
+    { ".rect", 7, 0x31 },
+    { ".rounded", 9, 0x32 },
+    { ".border", 9, 0x33 },
     { ".pixel", 0, 0x34 },
     { ".circle", 0, 0x35 },
     { ".line", 0, 0x36 },
-    { ".text", 4, 0x37 },
-    { ".textc", 4, 0x38 },
+    { ".text", 8, 0x37 },
+    { ".textc", 8, 0x38 },
     { ".vfs_exists", 0, 0x50 },
     { ".vfs_size", 0, 0x51 },
     { ".vfs_read", 0, 0x52 },
@@ -319,6 +319,127 @@ static void assemble_line(char *line)
             for (size_t at = 0; at < out; ++at) {
                 put8(encoded[at]);
             }
+        }
+        return;
+    }
+    if (def->has_arg == 7 || def->has_arg == 9) {
+        /* draw op: all operands are numbers, emitted left to right as 32-bit
+         * values except a single trailing 8-bit literal (radius) */
+        char *save = rest;
+        char *tok = rest;
+        int count = 0;
+
+        while (*tok != 0) {
+            ++count;
+            while (*tok == ' ') {
+                ++tok;
+            }
+            while (*tok != 0 && *tok != ' ') {
+                ++tok;
+            }
+        }
+        if (count < 3) {
+            fail("draw op '%.32s' needs at least 3 numbers", name);
+            return;
+        }
+        {
+            int index = 0;
+            long numbers[8];
+            char *scan = rest;
+
+            while (*scan != 0 && index < 8) {
+                char *stop = 0;
+                long got;
+
+                while (*scan == ' ') {
+                    ++scan;
+                }
+                if (*scan == 0) {
+                    break;
+                }
+                got = strtol(scan, &stop, 0);
+                if (stop == scan) {
+                    break;
+                }
+                numbers[index++] = got;
+                scan = stop;
+            }
+            if (def->has_arg == 9) {
+                for (index = 0; index < count - 1; ++index) {
+                    put32((uint32_t)numbers[index]);
+                }
+                put8((unsigned)numbers[count - 1]);
+            } else {
+                for (index = 0; index < count; ++index) {
+                    put32((uint32_t)numbers[index]);
+                }
+            }
+        }
+        (void)save;
+        return;
+    }
+    if (def->has_arg == 8) {
+        /* .text: trailing string first, then numeric operands */
+        char *string_at;
+        char *scan = rest;
+        long numbers[8];
+        int count = 0;
+        int index;
+        unsigned char encoded[MAX_LINE];
+        size_t out = 0;
+        size_t length;
+
+        /* take only leading tokens that are entirely numeric; the first
+         * non-numeric token starts the string */
+        while (*scan != 0 && count < 8) {
+            char *stop = 0;
+            long got;
+
+            while (*scan == ' ') {
+                ++scan;
+            }
+            if (*scan == 0) {
+                break;
+            }
+            got = strtol(scan, &stop, 0);
+            if (stop == scan) {
+                break;
+            }
+            numbers[count++] = got;
+            scan = stop;
+        }
+        string_at = scan;
+        if (*string_at == '"') {
+            char *close = strrchr(string_at + 1, '"');
+
+            if (close == 0) {
+                fail("unterminated string on: %s", name);
+                return;
+            }
+            *close = 0;
+            ++string_at;
+        }
+        for (index = 0; string_at[index] != 0 && (size_t)index < sizeof(encoded) - 1;
+             ++index) {
+            if (string_at[index] == '\\' && string_at[index + 1] != 0) {
+                ++index;
+                if (string_at[index] == 'n') {
+                    encoded[out++] = '\n';
+                } else {
+                    encoded[out++] = (unsigned char)string_at[index];
+                }
+            } else {
+                encoded[out++] = (unsigned char)string_at[index];
+            }
+        }
+        length = out;
+        put32((uint32_t)count);
+        for (index = 0; index < count; ++index) {
+            put32((uint32_t)numbers[index]);
+        }
+        put16((unsigned)length);
+        for (index = 0; (size_t)index < length; ++index) {
+            put8(encoded[index]);
         }
         return;
     }

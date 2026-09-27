@@ -70,6 +70,7 @@ void kby_unload(struct kby_app *app);
 int kby_app_count(void);
 struct kby_app *kby_app_at(int index);
 struct kby_app *kby_find(const char *name);
+int kby_app_slot(struct kby_app *app);
 
 bool kby_run(struct kby_app *app, uint32_t budget);
 void kby_flush_output(struct kby_app *app);

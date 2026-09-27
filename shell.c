@@ -1229,6 +1229,32 @@ static void cmd_rm(char **tokens, int count)
     }
 }
 
+/* A launcher entry names a file; an absolute path is used as-is and a bare
+ * name is looked up in /bin. */
+static void take_path(char *out, int max, const char *path)
+{
+    int used = 0;
+
+    if (path[0] == '/') {
+        while (path[used] != 0 && used < max - 1) {
+            out[used] = path[used];
+            ++used;
+        }
+        out[used] = 0;
+        return;
+    }
+    out[used++] = '/';
+    out[used++] = 'b';
+    out[used++] = 'i';
+    out[used++] = 'n';
+    out[used++] = '/';
+    while (path[used - 5] != 0 && used < max - 1) {
+        out[used] = path[used - 5];
+        ++used;
+    }
+    out[used] = 0;
+}
+
 static int shell_launcher_target(const char *name, char *entry, int entry_max)
 {
     int slot = launcher_resolve(name);
@@ -1248,17 +1274,60 @@ static int shell_launcher_target(const char *name, char *entry, int entry_max)
     return -1;
 }
 
+static bool shell_run_script(const char *name)
+{
+    int slot = launcher_resolve(name);
+    const struct launcher *item;
+    char path[VFS_PATH_MAX];
+    char resolved[VFS_PATH_MAX];
+    static uint8_t image[KBY_MAX_CODE];
+    struct kby_app *app;
+    int length;
+
+    if (slot < 0) {
+        terminal_puts("open: '");
+        terminal_puts(name);
+        terminal_puts("': no such program in /bin\n");
+        terminal_error();
+        return false;
+    }
+    item = launcher_at(slot);
+    take_path(path, (int)sizeof(path), item->entry);
+    vfs_absolute_of(path, "/", resolved, (int)sizeof(resolved));
+    if (vfs_exists(resolved) == false) {
+        terminal_puts("open: ");
+        terminal_puts(resolved);
+        terminal_puts(": program not found\n");
+        terminal_error();
+        return false;
+    }
+    length = vfs_read(resolved, (char *)image, (uint32_t)sizeof(image));
+    if (length <= 0) {
+        terminal_puts("open: cannot read ");
+        terminal_puts(resolved);
+        terminal_puts("\n");
+        terminal_error();
+        return false;
+    }
+    app = kby_load(item->file, image, (uint32_t)length);
+    if (app == 0) {
+        terminal_puts("open: ");
+        terminal_puts(kby_last_error() != 0 ? kby_last_error() : "bad image");
+        terminal_puts("\n");
+        terminal_error();
+        return false;
+    }
+    wm_launch_script(kby_app_slot(app), item->title, 520, 380);
+    return true;
+}
+
 bool shell_run_app(const char *name)
 {
     char entry[LAUNCHER_ENTRY_MAX];
     int builtin = shell_launcher_target(name, entry, (int)sizeof(entry));
 
     if (builtin == -2) {
-        terminal_puts("open: '");
-        terminal_puts(name);
-        terminal_puts("': bytecode apps are not wired up yet\n");
-        terminal_error();
-        return false;
+        return shell_run_script(name);
     }
     if (builtin < 0) {
         terminal_puts("open: unknown application '");

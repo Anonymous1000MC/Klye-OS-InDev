@@ -19,6 +19,7 @@ struct launcher {
     char path[LAUNCHER_PATH_MAX];
     int icon;
     bool used;
+    bool is_record;
 };
 
 void launcher_scan(void);

@@ -58,8 +58,16 @@ $(BUILD_DIR)/kbasm: tools/kbasm.c | $(TOOLS)
 $(ROOTFS)/%.kbin: $(ROOTFS)/%.kby $(BUILD_DIR)/kbasm
 	$(BUILD_DIR)/kbasm $< $@
 
-KBY_SOURCES := $(shell find $(ROOTFS) -name '*.kby' 2>/dev/null)
-KBY_BINARIES := $(KBY_SOURCES:.kby=.kbin)
+# programs named by a /bin launcher are assembled straight into /bin
+$(ROOTFS)/bin/%.kbin: $(ROOTFS)/home/klye/kby/%.kby $(BUILD_DIR)/kbasm
+	$(BUILD_DIR)/kbasm $< $@
+
+KBY_SOURCES := $(shell find $(ROOTFS)/home -name '*.kby' 2>/dev/null)
+# only programs named by a "kind = kby" launcher are staged into /bin
+KBY_BIN_PROGRAMS := $(patsubst %,$(ROOTFS)/bin/%,$(shell sed -n 's/^kind *= *kby$$//p' $(ROOTFS)/bin/* 2>/dev/null >/dev/null; for l in $(ROOTFS)/bin/*; do \
+  if grep -q '^kind *= *kby$$' $$l 2>/dev/null; then \
+    grep '^entry *= *' $$l | sed 's/^entry *= *//'; fi; done))
+KBY_BINARIES := $(KBY_SOURCES:.kby=.kbin) $(KBY_BIN_PROGRAMS)
 
 $(VFS_IMAGE): $(BUILD_DIR)/mkvfs $(KBY_BINARIES) \
              $(shell find $(ROOTFS) -type f ! -name '*.kby' 2>/dev/null)

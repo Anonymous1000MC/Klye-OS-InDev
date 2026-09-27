@@ -24,6 +24,8 @@ struct kby_cmd {
     int32_t b;
     int32_t c;
     int32_t d;
+    uint32_t colour;
+    int32_t radius;
     char text[KBY_CMD_TEXT];
 };
 
@@ -51,6 +53,7 @@ struct kby_app {
     int list_count;
     int32_t result;
     int32_t radius;
+    int32_t pending_radius;
     bool has_result;
     uint32_t steps;
     uint32_t slices;
@@ -111,8 +114,9 @@ const char *kby_last_error(void)
     return last_error[0] != 0 ? last_error : 0;
 }
 
-static void emit(struct kby_app *app, uint8_t op, int32_t a, int32_t b,
-                 int32_t c, int32_t d, const char *text)
+static void emit_colour(struct kby_app *app, uint8_t op, int32_t a, int32_t b,
+                        int32_t c, int32_t d, const char *text,
+                        uint32_t colour)
 {
     struct kby_cmd *cmd;
     int index = 0;
@@ -127,6 +131,8 @@ static void emit(struct kby_app *app, uint8_t op, int32_t a, int32_t b,
     cmd->b = b;
     cmd->c = c;
     cmd->d = d;
+    cmd->colour = colour;
+    cmd->radius = app != 0 ? app->pending_radius : 0;
     if (text != 0) {
         while (text[index] != 0 && index < KBY_CMD_TEXT - 1) {
             cmd->text[index] = text[index];
@@ -134,6 +140,12 @@ static void emit(struct kby_app *app, uint8_t op, int32_t a, int32_t b,
         }
     }
     cmd->text[index] = 0;
+}
+
+static void emit(struct kby_app *app, uint8_t op, int32_t a, int32_t b,
+                 int32_t c, int32_t d, const char *text)
+{
+    emit_colour(app, op, a, b, c, d, text, THEME_SURFACE);
 }
 
 static void out_append(struct kby_app *app, const char *text, bool newline)
@@ -340,6 +352,16 @@ struct kby_app *kby_app_at(int index)
     return &apps[index];
 }
 
+int kby_app_slot(struct kby_app *app)
+{
+    for (int index = 0; index < KBY_MAX_APPS; ++index) {
+        if (&apps[index] == app) {
+            return index;
+        }
+    }
+    return -1;
+}
+
 struct kby_app *kby_find(const char *name)
 {
     for (int index = 0; index < KBY_MAX_APPS; ++index) {
@@ -396,7 +418,6 @@ bool kby_run(struct kby_app *app, uint32_t budget)
         }
         ++spent;
         ++app->steps;
-
         switch (opcode) {
         case KBY_OP_NOP:
             break;
@@ -639,30 +660,35 @@ bool kby_run(struct kby_app *app, uint32_t budget)
         case KBY_OP_DRAW_RECT:
         case KBY_OP_DRAW_ROUNDED:
         case KBY_OP_DRAW_BORDER: {
-            int32_t colour;
-            int32_t height;
-            int32_t width;
-            int32_t top;
-            int32_t left;
-            int32_t radius = 0;
+            /* geometry is inline (x, y, w, h); the colour comes off the stack */
+            int32_t values[4];
+            uint32_t raw;
+            uint32_t index;
 
+            for (index = 0; index < 4U; ++index) {
+                if (!fetch32(app, &raw)) {
+                    return false;
+                }
+                values[index] = (int32_t)raw;
+            }
             if (opcode != KBY_OP_DRAW_RECT) {
-                uint32_t raw;
-
                 if (!fetch8(app, &raw)) {
                     return false;
                 }
-                radius = (int32_t)raw;
+                app->pending_radius = (int32_t)raw;
+            } else {
+                app->pending_radius = 0;
             }
-            if (!pop(app, &colour) || !pop(app, &height) ||
-                !pop(app, &width) || !pop(app, &top) || !pop(app, &left)) {
-                return false;
+            {
+                int32_t colour;
+
+                if (!pop(app, &colour)) {
+                    return false;
+                }
+                app->radius = app->pending_radius;
+                emit_colour(app, (uint8_t)opcode, values[0], values[1],
+                            values[2], values[3], 0, (uint32_t)colour);
             }
-            app->result = colour;
-            app->radius = radius;
-            emit(app, (uint8_t)opcode, left, top, width, height, 0);
-            app->radius = 0;
-            emit(app, KBY_OP_FILL_HEX, 0, 0, 0, 0, 0);
             break;
         }
         case KBY_OP_DRAW_PIXEL:
@@ -682,19 +708,49 @@ bool kby_run(struct kby_app *app, uint32_t budget)
         }
         case KBY_OP_DRAW_TEXT:
         case KBY_OP_DRAW_TEXT_CENTER: {
+            uint32_t count = 0;
+            uint32_t raw;
+            int32_t values[2];
+            uint32_t length = 0;
             const char *text;
-            int32_t colour;
-            int32_t top;
-            int32_t left;
+            char *slot;
 
-            text = fetch_str(app, 0);
-            if (text == 0) {
+            if (!fetch32(app, &count) || count != 2U) {
+                fail(app, "text: bad operand count");
                 return false;
             }
-            if (!pop(app, &colour) || !pop(app, &top) || !pop(app, &left)) {
+            for (uint32_t index = 0; index < count; ++index) {
+                if (!fetch32(app, &raw)) {
+                    return false;
+                }
+                values[index] = (int32_t)raw;
+            }
+            if (!fetch16(app, &length)) {
                 return false;
             }
-            emit(app, (uint8_t)opcode, left, top, colour, 0, text);
+            if (length > app->code_length - app->pc) {
+                fail(app, "text: string past end of program");
+                return false;
+            }
+            text = (const char *)(const void *)&app->code[app->pc];
+            app->pc += length;
+            if (app->arena_used + length + 1U > KBY_ARENA_BYTES) {
+                fail(app, "string arena exhausted");
+                return false;
+            }
+            slot = &app->arena[app->arena_used];
+            __builtin_memcpy(slot, text, (size_t)length);
+            slot[length] = 0;
+            app->arena_used += length + 1U;
+            {
+                int32_t colour;
+
+                if (!pop(app, &colour)) {
+                    return false;
+                }
+                emit_colour(app, (uint8_t)opcode, values[0], values[1], 0, 0,
+                            slot, (uint32_t)colour);
+            }
             break;
         }
 
@@ -927,7 +983,6 @@ void kby_draw(struct kby_app *app, struct gfx_surface *surface, int x, int y,
               int width, int height)
 {
     uint32_t colour = THEME_SURFACE;
-    int32_t radius = 0;
 
     if (app == 0) {
         return;
@@ -938,21 +993,20 @@ void kby_draw(struct kby_app *app, struct gfx_surface *surface, int x, int y,
         int left = x + cmd->a;
         int top = y + cmd->b;
 
+        colour = cmd->colour;
         switch (cmd->op) {
         case KBY_OP_FILL_HEX:
-            colour = (uint32_t)app->result;
-            radius = app->radius;
             break;
         case KBY_OP_DRAW_RECT:
             gfx_fill(surface, left, top, cmd->c, cmd->d, colour);
             break;
         case KBY_OP_DRAW_ROUNDED:
             gfx_rounded_rect(surface, left, top, cmd->c, cmd->d,
-                             radius > 0 ? radius : 6, colour);
+                             cmd->radius > 0 ? cmd->radius : 6, colour);
             break;
         case KBY_OP_DRAW_BORDER:
             gfx_rounded_border(surface, left, top, cmd->c, cmd->d,
-                               radius > 0 ? radius : 6, 1, colour);
+                               cmd->radius > 0 ? cmd->radius : 6, 1, colour);
             break;
         case KBY_OP_DRAW_PIXEL:
             gfx_pixel(surface, left, top, colour);

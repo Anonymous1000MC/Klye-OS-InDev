@@ -1,0 +1,6 @@
+# klye launcher record
+name = panel
+title = Panel
+kind = kby
+entry = panel.kbin
+icon = 5

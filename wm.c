@@ -6,6 +6,7 @@
 #include "font.h"
 #include "gfx.h"
 #include "input.h"
+#include "kby.h"
 #include "kernel.h"
 #include "shell.h"
 #include "theme.h"
@@ -43,6 +44,7 @@ struct menu_def {
 struct wm_window {
     int used;
     int app;
+    int script;
     int x;
     int y;
     int width;
@@ -847,6 +849,11 @@ static void draw_window_content(struct gfx_surface *surface,
     int width = window->width;
     int height = window->height - THEME_TITLEBAR_HEIGHT;
 
+    if (window->script >= 0) {
+        kby_draw(kby_app_at(window->script), surface, x, y, width, height);
+        return;
+    }
+
     switch ((enum app_id)window->app) {
     case APP_TERMINAL:
         terminal_draw(surface, x, y, width, height);
@@ -1170,9 +1177,14 @@ static void draw_window(struct gfx_surface *surface, struct wm_window *window)
                      THEME_TRAFFIC_RING);
         }
     }
-    font_draw(surface, window->x + 74, traffic_y + 3, app_title(
-                   (enum app_id)window->app),
-              active ? THEME_TEXT_PRIMARY : THEME_TEXT_SECONDARY, 1);
+    {
+        const char *label = window->script >= 0
+                                ? kby_app_title(kby_app_at(window->script))
+                                : app_title((enum app_id)window->app);
+
+        font_draw(surface, window->x + 74, traffic_y + 3, label,
+                  active ? THEME_TEXT_PRIMARY : THEME_TEXT_SECONDARY, 1);
+    }
     if (active) {
         gfx_fill(surface, window->x + 60, traffic_y - 1, 8, 2,
                  THEME_ACCENT);
@@ -1477,7 +1489,18 @@ static void focus_window(int index)
 static int find_window_for_app(int app)
 {
     for (int index = 0; index < WM_WINDOW_LIMIT; ++index) {
-        if (wm.windows[index].used != 0 && wm.windows[index].app == app) {
+        if (wm.windows[index].used != 0 && wm.windows[index].app == app &&
+            wm.windows[index].script < 0) {
+            return index;
+        }
+    }
+    return -1;
+}
+
+static int find_window_for_script(int script)
+{
+    for (int index = 0; index < WM_WINDOW_LIMIT; ++index) {
+        if (wm.windows[index].used != 0 && wm.windows[index].script == script) {
             return index;
         }
     }
@@ -1489,8 +1512,13 @@ static void close_window(int index)
     if (index < 0 || index >= WM_WINDOW_LIMIT) {
         return;
     }
-    app_close((enum app_id)wm.windows[index].app);
+    if (wm.windows[index].script >= 0) {
+        kby_unload(kby_app_at(wm.windows[index].script));
+    } else {
+        app_close((enum app_id)wm.windows[index].app);
+    }
     wm.windows[index].used = 0;
+    wm.windows[index].script = -1;
     if (wm.focused == index) {
         wm.focused = -1;
         for (int scan = WM_WINDOW_LIMIT - 1; scan >= 0; --scan) {
@@ -1501,6 +1529,59 @@ static void close_window(int index)
         }
     }
     mark_chrome_dirty();
+}
+
+void wm_launch_script(int script_index, const char *title, int width,
+                      int height)
+{
+    int slot = -1;
+    int existing = find_window_for_script(script_index);
+
+    if (existing >= 0) {
+        focus_window(existing);
+        mark_chrome_dirty();
+        return;
+    }
+    for (int index = 0; index < WM_WINDOW_LIMIT; ++index) {
+        if (wm.windows[index].used == 0) {
+            slot = index;
+            break;
+        }
+    }
+    if (slot < 0) {
+        return;
+    }
+    if (width > (int)gfx_width() - 80) {
+        width = (int)gfx_width() - 80;
+    }
+    if (height > (int)gfx_height() - 160) {
+        height = (int)gfx_height() - 160;
+    }
+    {
+        int offset = wm.window_count * 26;
+
+        if (offset > 150) {
+            offset = 150;
+        }
+        wm.windows[slot].x = 120 + offset;
+        wm.windows[slot].y = desktop_top() + 34 + offset;
+    }
+    wm.windows[slot].used = 1;
+    wm.windows[slot].app = 0;
+    wm.windows[slot].script = script_index;
+    wm.windows[slot].width = width;
+    wm.windows[slot].height = height;
+    wm.windows[slot].restore_x = wm.windows[slot].x;
+    wm.windows[slot].restore_y = wm.windows[slot].y;
+    wm.windows[slot].restore_width = width;
+    wm.windows[slot].restore_height = height;
+    wm.windows[slot].content_dirty = 1;
+    wm.window_count++;
+    wm.next_z++;
+    wm.windows[slot].z = wm.next_z;
+    wm.focused = slot;
+    mark_chrome_dirty();
+    (void)title;
 }
 
 void wm_launch_app(enum app_id app)
@@ -1543,6 +1624,7 @@ void wm_launch_app(enum app_id app)
     }
     wm.windows[slot].used = 1;
     wm.windows[slot].app = app;
+    wm.windows[slot].script = -1;
     wm.windows[slot].width = width;
     wm.windows[slot].height = height;
     wm.windows[slot].restore_x = wm.windows[slot].x;
@@ -2125,6 +2207,7 @@ static void refresh_chrome(void)
     wm.fps_window_frames = 0;
     for (int index = 0; index < WM_WINDOW_LIMIT; ++index) {
         wm.windows[index].used = 0;
+        wm.windows[index].script = -1;
         wm.windows[index].z = 0;
         wm.windows[index].content_dirty = 0;
     }
@@ -2162,6 +2245,25 @@ void wm_init(void)
     wm.present_count++;
 }
 
+static void service_scripts(void)
+{
+    for (int index = 0; index < WM_WINDOW_LIMIT; ++index) {
+        struct kby_app *app;
+
+        if (wm.windows[index].used == 0 || wm.windows[index].script < 0) {
+            continue;
+        }
+        app = kby_app_at(wm.windows[index].script);
+        if (kby_app_loaded(app) == false) {
+            continue;
+        }
+        kby_run(app, KBY_BUDGET);
+        if (kby_app_loaded(app)) {
+            wm.windows[index].content_dirty = 1;
+        }
+    }
+}
+
 void wm_service(void)
 {
     struct mouse_event mouse_event;
@@ -2173,6 +2275,7 @@ void wm_service(void)
     if (wm.ready == 0U) {
         return;
     }
+    service_scripts();
     while (input_poll_mouse(&mouse_event)) {
         process_mouse(&mouse_event);
     }
