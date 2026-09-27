@@ -2,6 +2,7 @@
 #include <stdint.h>
 
 #include "apps.h"
+#include "font.h"
 #include "gfx.h"
 #include "gui.h"
 #include "input.h"
@@ -919,6 +920,58 @@ static const char *fault_cause_text(void)
     return "cpu exception during kernel execution";
 }
 
+/* The panic screen.  A panic can happen at any point, including long after the
+ * GUI owns the framebuffer, so this paints the whole display itself rather
+ * than relying on any window state being sane.  The full diagnosis stays on
+ * the serial port: a panic during compositing is exactly the case where the
+ * screen is least likely to be readable. */
+static void panic_screen(const char *reason)
+{
+    static const uint32_t black = 0xFF000000U;
+    static const uint32_t white = 0xFFFFFFFFU;
+    struct gfx_surface *surface = gfx_backbuffer();
+    int width = (int)gfx_width();
+    int height = (int)gfx_height();
+    int centre;
+    int base;
+    int title_scale = 4;
+    int title_width;
+
+    if (surface == 0 || width <= 0 || height <= 0) {
+        return;
+    }
+    gfx_fill(surface, 0, 0, width, height, black);
+
+    /* a plain K in the top left corner */
+    font_draw(surface, 24, 40, "K", white, 3);
+
+    centre = width / 2;
+    base = height / 2 - 60;
+
+    title_width = font_text_width("KERNEL PANIC", title_scale);
+    font_draw(surface, centre - title_width / 2, base, "KERNEL PANIC", white,
+              title_scale);
+    base += 56;
+
+    if (reason != 0 && reason[0] != 0) {
+        int reason_width = font_text_width(reason, 1);
+
+        font_draw(surface, centre - reason_width / 2, base, reason, white, 1);
+        base += 40;
+    }
+    {
+        static const char advice[] = "Please reboot your computer";
+        int advice_width = font_text_width_spaced(advice, 1, 1);
+
+        font_draw(surface, centre - advice_width / 2, base, advice, white, 1);
+    }
+    /* present only copies what is marked damaged, and the damage left over
+     * from the last composited frame would otherwise leave most of the
+     * desktop on screen around the panic text */
+    gfx_damage_all();
+    gfx_present();
+}
+
 __attribute__((noreturn)) void panic(const char *message)
 {
     __asm__ volatile("cli");
@@ -952,23 +1005,10 @@ __attribute__((noreturn)) void panic(const char *message)
         serial_write("  detected cause : software invariant failed, "
                      "no cpu exception was recorded\n");
     }
-    if (console_enabled) {
-        console_clear();
-        console_write("*** KERNEL PANIC ***\n");
-        console_write(message != 0 ? message : "unspecified failure");
-        console_write("\n\ndiagnosis: ");
-        console_write(last_fault.captured != 0U ? fault_cause_text()
-                                               : "software invariant failed");
-        if (last_fault.captured != 0U) {
-            console_write("\nexception: ");
-            console_write(exception_name(last_fault.vector));
-            console_number("\nfaulting rip: 0x", last_fault.rip, "");
-            console_number("\nfault address: 0x", last_fault.cr2, "");
-            console_number("\nerror code: 0x", last_fault.error, "");
-        }
-        console_write("\n\nsystem halted");
-        console_flush();
-    }
+    /* the screen gets the short version; serial has the full detail */
+    panic_screen(last_fault.captured != 0U ? fault_cause_text()
+                                          : (message != 0 ? message
+                                                          : "unspecified failure"));
     serial_write("system halted\n");
     halt_forever();
 }
