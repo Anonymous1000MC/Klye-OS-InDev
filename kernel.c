@@ -14,6 +14,7 @@
 #include "shell.h"
 #include "theme.h"
 #include "wm.h"
+#include "ata.h"
 #include "vfs.h"
 
 struct __attribute__((packed)) gdt_descriptor {
@@ -201,6 +202,25 @@ void serial_init(void)
     outb(0x3F8 + 3, 0x03);
     outb(0x3F8 + 2, 0xC7);
     outb(0x3F8 + 4, 0x0B);
+}
+
+void serial_write_decimal(uint64_t value)
+{
+    char digits[24];
+    int length = 0;
+
+    if (value == 0) {
+        serial_putc('0');
+        return;
+    }
+    while (value != 0 && length < (int)sizeof(digits)) {
+        digits[length++] = (char)('0' + (int)(value % 10U));
+        value /= 10U;
+    }
+    while (length > 0) {
+        --length;
+        serial_putc(digits[length]);
+    }
 }
 
 void serial_write(const char *text)
@@ -774,6 +794,21 @@ void kernel_main(uint64_t framebuffer_address, uint32_t pitch,
             map_available = true;
             heap_init(map, map_length, (uint64_t)(uintptr_t)&kernel_end);
         }
+    }
+
+    /* Probe the disk before anything else touches it.  A machine with no
+     * drive has to carry on perfectly well, so a failure here is reported and
+     * then ignored rather than being fatal. */
+    if (ata_identify()) {
+        serial_write("ata: ");
+        serial_write(ata_model());
+        serial_write(", ");
+        serial_write_decimal(ata_sector_count());
+        serial_write(" sectors\n");
+    } else {
+        serial_write("ata: none (");
+        serial_write(ata_error());
+        serial_write(")\n");
     }
 
     /* The framebuffer has to exist before the first line is written.  The

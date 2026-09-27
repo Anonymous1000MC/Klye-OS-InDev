@@ -85,7 +85,7 @@ class Qmp:
 
 
 class Guest:
-    def __init__(self, tag, iso=ISO, mem='512M', port=4444):
+    def __init__(self, tag, iso=ISO, mem='512M', port=4444, disk=None):
         self.tag = tag
         self.log_path = '/tmp/opencode/%s.log' % tag
         self.gdb_path = '127.0.0.1:%d' % port
@@ -93,9 +93,12 @@ class Guest:
         for path in (self.log_path, self.qmp_path):
             if os.path.exists(path):
                 os.unlink(path)
+        disk = disk or '/tmp/opencode/klye.img'
+        self.disk_path = disk
         self.proc = subprocess.Popen([
             'qemu-system-x86_64',
             '-cdrom', iso,
+            '-drive', 'file=%s,format=raw,if=ide,index=0,media=disk' % disk,
             '-m', mem,
             '-serial', 'file:%s' % self.log_path,
             '-display', 'none',

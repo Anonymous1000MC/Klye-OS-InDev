@@ -2,6 +2,7 @@
 #include <stdint.h>
 
 #include "apps.h"
+#include "ata.h"
 #include "vfs.h"
 #include "gfx.h"
 #include "input.h"
@@ -661,6 +662,59 @@ static void cmd_df(void)
 /* Exercises the allocator: many sizes, free everything, then reallocate in
  * random-ish order and confirm the data survived.  Lua's collector depends on
  * free() actually returning memory. */
+/* "ata" reports what the drive says, and "ataread <lba>" pulls one sector
+ * back so the transfer path can be checked against a known pattern. */
+static void cmd_ata(void)
+{
+    if (!ata_present()) {
+        terminal_puts("ata: no drive; ");
+        terminal_puts(ata_error());
+        terminal_puts("\n");
+        terminal_error();
+        return;
+    }
+    terminal_puts("ata: ");
+    terminal_puts(ata_model());
+    terminal_puts("\nata: ");
+    terminal_printf_number((uint64_t)ata_sector_count());
+    terminal_puts(" sectors, ");
+    terminal_printf_number((uint64_t)ata_sector_count() * 512ULL);
+    terminal_puts(" bytes\n");
+}
+
+static void cmd_ataread(char **tokens, int count)
+{
+    uint32_t lba;
+    uint8_t sector[ATA_SECTOR_BYTES];
+    uint32_t shown;
+
+    if (count < 2) {
+        terminal_puts("ataread: usage: ataread <lba>\n");
+        terminal_error();
+        return;
+    }
+    lba = (uint32_t)shell_atoi_value(tokens[1]);
+    if (!ata_read(lba, 1U, sector)) {
+        terminal_puts("ataread: ");
+        terminal_puts(ata_error());
+        terminal_puts("\n");
+        terminal_error();
+        return;
+    }
+    terminal_puts("ataread ");
+    terminal_printf_number((uint64_t)lba);
+    terminal_puts(": ");
+    for (shown = 0; shown < 32U; ++shown) {
+        char pair[3];
+
+        pair[0] = "0123456789abcdef"[sector[shown] >> 4];
+        pair[1] = "0123456789abcdef"[sector[shown] & 0x0FU];
+        pair[2] = 0;
+        terminal_puts(pair);
+    }
+    terminal_puts("\n");
+}
+
 static void cmd_heapcheck(void)
 {
     static void *slots[64];
@@ -2100,6 +2154,10 @@ void shell_execute(const char *line)
 
     if (text_equal(tokens[0], "help") || text_equal(tokens[0], "?")) {
         cmd_help();
+    } else if (text_equal(tokens[0], "ata")) {
+        cmd_ata();
+    } else if (text_equal(tokens[0], "ataread")) {
+        cmd_ataread(tokens, count);
     } else if (text_equal(tokens[0], "bench")) {
         uint32_t rounds = 30U;
 

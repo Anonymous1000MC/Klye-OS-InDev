@@ -47,6 +47,7 @@ void interrupt_dispatch(struct interrupt_registers *registers,
                         uint64_t vector);
 void serial_init(void);
 void serial_write(const char *text);
+void serial_write_decimal(uint64_t value);
 void panic(const char *message);
 __attribute__((noreturn)) void halt_forever(void);
 
