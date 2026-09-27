@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include "gfx.h"
+#include "heap.h"
 #include "theme.h"
 #include "kernel.h"
 
@@ -23,7 +24,13 @@ static struct gfx_surface display_surface;
 static uint32_t *back_pixels;
 static uint32_t present_counter;
 static uint32_t present_rows;
-static uint8_t gfx_arena[GFX_ARENA_BYTES] __attribute__((aligned(4096)));
+/* The arena used to be a 12 MiB static array, which was almost the whole BSS
+ * budget and left nothing for the frame heap or for future work.  It is now
+ * taken from the Multiboot-backed frame heap, which has hundreds of MiB. */
+static uint8_t *gfx_arena;
+static size_t arena_bytes;
+
+
 static uint32_t blur_rows[GFX_BLUR_ROW_MAX];
 static uint32_t blur_columns[GFX_BLUR_COLUMN_MAX];
 
@@ -276,15 +283,33 @@ void gfx_init(uint32_t framebuffer, uint32_t pitch_bytes, uint32_t width,
     display_surface.origin_x = 0;
     display_surface.origin_y = 0;
 
+    pixels = width * height;
+    if (gfx_arena == 0) {
+        /* Ask for the full arena first, then fall back to just enough for the
+         * back buffer.  A machine too small for either is not going to run
+         * this desktop, and saying so plainly beats a corrupt display. */
+        size_t minimum = (size_t)pixels * 4U + GFX_FRAME_RESERVE_BYTES;
+        void *pages = heap_alloc_pages(GFX_ARENA_BYTES);
+
+        if (pages == 0) {
+            pages = heap_alloc_pages(minimum);
+            if (pages == 0) {
+                panic("gfx: not enough memory for the framebuffer");
+            }
+            arena_bytes = minimum;
+        } else {
+            arena_bytes = GFX_ARENA_BYTES;
+        }
+        gfx_arena = (uint8_t *)(uintptr_t)pages;
+    }
     arena_base = gfx_arena;
     pool_base = (uint32_t *)(void *)gfx_arena;
     pool_cursor = pool_base;
-    pool_limit = GFX_ARENA_BYTES - GFX_FRAME_RESERVE_BYTES;
+    pool_limit = arena_bytes - GFX_FRAME_RESERVE_BYTES;
     frame_pool_end = (uint32_t *)(void *)(gfx_arena + pool_limit);
     frame_pool_cursor = frame_pool_end;
     (void)frame_pool_end;
 
-    pixels = width * height;
     back_pixels = (uint32_t *)gfx_alloc(pixels * 4U);
     back_surface.pixels = back_pixels;
     if (back_pixels == NULL) {

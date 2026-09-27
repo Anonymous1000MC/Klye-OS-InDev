@@ -39,13 +39,10 @@ SECTIONS
         *(COMMON)
         *(.bss .bss.*)
         bss_end = .;
-    } :data
-
-    .gfxbuf ALIGN(4K) :
-    {
-        gfx_buffer_start = .;
-        *(.gfxbuf .gfxbuf.*)
-        gfx_buffer_end = .;
+        /* Everything the kernel image needs is above this, and the frame heap
+         * deliberately starts here so it can grow without fighting the
+         * linker for BSS budget. */
+        kernel_end = .;
     } :data
 
     /DISCARD/ :
@@ -56,6 +53,6 @@ SECTIONS
     }
 }
 
-ASSERT(bss_end - bss_start < 0xE00000, "kernel BSS exceeds 14 MiB")
-ASSERT(gfx_buffer_end - gfx_buffer_start <= 0x900000, "G back buffer too large")
-ASSERT(gfx_buffer_end < 0x1000000, "G back buffer must stay below 16 MiB")
+/* BSS is small now: the graphics arena and the task stacks come from the
+ * frame heap, so this budget is mostly the filesystem and the app state. */
+ASSERT(bss_end - bss_start < 0x400000, "kernel BSS exceeds 4 MiB")

@@ -55,7 +55,7 @@ static struct idt_pointer idt_pointer_value;
 static volatile uint64_t tick_count;
 
 extern void fpu_enable(void);
-extern uint8_t gfx_buffer_end[];
+extern uint8_t kernel_end[];
 extern void *isr_table[32];
 extern void *irq_table[16];
 extern void isr255(void);
@@ -758,9 +758,23 @@ void kernel_main(uint64_t framebuffer_address, uint32_t pitch,
     void *boot_stack = __builtin_frame_address(0);
     uint64_t memory_bytes;
     bool video = framebuffer_address != 0U && bpp == 32U;
+    bool map_available = false;
 
     serial_init();
     fpu_enable();
+
+    /* The frame heap comes up first and without a console: the graphics arena
+     * is allocated from it, so it has to exist before the display does.  It
+     * only needs the Multiboot memory map, which is available immediately. */
+    {
+        uint32_t map_length = 0;
+        const void *map = map_tag_location(&map_length);
+
+        if (map != 0) {
+            map_available = true;
+            heap_init(map, map_length, (uint64_t)(uintptr_t)&kernel_end);
+        }
+    }
 
     /* The framebuffer has to exist before the first line is written.  The
      * console paints into the back buffer, so initialising it later meant
@@ -793,6 +807,19 @@ void kernel_main(uint64_t framebuffer_address, uint32_t pitch,
     post("GLOBAL DESCRIPTOR TABLE", "OK");
     post("INTERRUPT DESCRIPTOR TABLE", "OK");
     post("SSE / FLOATING POINT", "OK");
+
+    /* the heap was brought up before the framebuffer, so it can be reported
+     * now that the console exists */
+    if (map_available != 0 && heap_ready()) {
+        post("HEAP", "OK");
+        post_number("  ", heap_total_bytes(), " bytes in ");
+        post_number("", (uint32_t)heap_page_count(), " pages\n");
+    } else {
+        post("HEAP", "SKIP");
+        post_line(map_available != 0
+                      ? "       not enough memory above the kernel image\n"
+                      : "       no memory map\n");
+    }
     report_cpu();
 
     memory_bytes = map_tag_total();
@@ -806,25 +833,6 @@ void kernel_main(uint64_t framebuffer_address, uint32_t pitch,
         post_line("       multiboot memory map unavailable\n");
     }
     post("MEMORY MAP", "OK");
-    {
-        uint32_t map_length = 0;
-        const void *map = map_tag_location(&map_length);
-
-        if (map != 0) {
-            heap_init(map, map_length, (uint64_t)(uintptr_t)&gfx_buffer_end);
-            if (heap_ready()) {
-                post("HEAP", "OK");
-                post_number("  ", heap_total_bytes(), " bytes in ");
-                post_number("", (uint32_t)heap_page_count(), " pages\n");
-            } else {
-                post("HEAP", "SKIP");
-                post_line("       not enough memory above the kernel image\n");
-            }
-        } else {
-            post("HEAP", "SKIP");
-            post_line("       no memory map\n");
-        }
-    }
 
     scheduler_init(boot_stack);
     post("TASK SCHEDULER", "OK");
