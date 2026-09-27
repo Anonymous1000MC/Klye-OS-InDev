@@ -11,7 +11,7 @@
 
 #define KBY_LIST_MAX 64
 #define KBY_TEXT_MAX 4096
-#define KBY_ARENA_BYTES 4096
+#define KBY_ARENA_BYTES 4608
 #define KBY_MAX_FRAMES 64
 #define KBY_FRAMES KBY_MAX_FRAMES
 #define KBY_ARENA_SLOT 24
@@ -217,7 +217,7 @@ static bool fetch32(struct kby_app *app, uint32_t *out)
 
 /* Strings live in the app's own code buffer, so the pointer stays valid for
  * the lifetime of the app and PUSHSTR needs no separate string table. */
-static const char *fetch_str(struct kby_app *app)
+static const char *fetch_str(struct kby_app *app, uint32_t *out_length)
 {
     uint32_t length;
     const char *text;
@@ -231,6 +231,9 @@ static const char *fetch_str(struct kby_app *app)
     }
     text = (const char *)(const void *)&app->code[app->pc];
     app->pc += length;
+    if (out_length != 0) {
+        *out_length = length;
+    }
     return text;
 }
 
@@ -416,12 +419,22 @@ bool kby_run(struct kby_app *app, uint32_t budget)
             break;
         }
         case KBY_OP_PUSHSTR: {
-            const char *text = fetch_str(app);
+            uint32_t length = 0;
+            const char *text = fetch_str(app, &length);
+            char *slot;
 
             if (text == 0) {
                 return false;
             }
-            push(app, (int32_t)(uintptr_t)text);
+            if (app->arena_used + length + 1U > KBY_ARENA_BYTES) {
+                fail(app, "string arena exhausted");
+                return false;
+            }
+            slot = &app->arena[app->arena_used];
+            __builtin_memcpy(slot, text, (size_t)length);
+            slot[length] = 0;
+            app->arena_used += length + 1U;
+            push(app, (int32_t)(uintptr_t)slot);
             break;
         }
         case KBY_OP_POP: {
@@ -674,7 +687,7 @@ bool kby_run(struct kby_app *app, uint32_t budget)
             int32_t top;
             int32_t left;
 
-            text = fetch_str(app);
+            text = fetch_str(app, 0);
             if (text == 0) {
                 return false;
             }
@@ -687,21 +700,20 @@ bool kby_run(struct kby_app *app, uint32_t budget)
 
         case KBY_OP_VFS_EXISTS:
         case KBY_OP_VFS_SIZE: {
-            const char *path;
             int32_t pointer;
 
             if (!pop(app, &pointer)) {
                 return false;
             }
-            path = (const char *)(uintptr_t)pointer;
-            path = fetch_str(app);
-            if (path == 0) {
+            if (pointer == 0) {
+                fail(app, "vfs: expected a path on the stack");
                 return false;
             }
             if (opcode == KBY_OP_VFS_EXISTS) {
-                push(app, vfs_exists(path) ? 1 : 0);
+                push(app, vfs_exists((const char *)(uintptr_t)pointer) ? 1
+                                                                       : 0);
             } else {
-                int node = vfs_resolve(path, 0);
+                int node = vfs_resolve((const char *)(uintptr_t)pointer, 0);
 
                 push(app, node > 0 ? (int32_t)vfs_size(node) : -1);
             }

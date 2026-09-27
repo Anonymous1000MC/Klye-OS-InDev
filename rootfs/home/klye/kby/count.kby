@@ -1,0 +1,29 @@
+# count.kby - a loop with a counter
+#   .cmp pops the top of stack first: push the value you want tested
+#   first.  Here "load 0; push8 0" leaves 0 on top, so cmp yields
+#   1 while var0 is still greater than 0.
+.pushstr "counting down: "
+.print
+.push8 5
+.store 0
+@loop
+.load 0
+.push8 0
+.cmp
+.jz @done
+.load 0
+.num
+.print
+.pushstr " "
+.print
+.load 0
+.push8 1
+.sub
+.store 0
+.jmp @loop
+@done
+.pushstr "\n"
+.print
+.pushstr "done"
+.println
+.halt
