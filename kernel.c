@@ -7,6 +7,7 @@
 #include "input.h"
 #include "io.h"
 #include "launcher.h"
+#include "heap.h"
 #include "kernel.h"
 #include "scheduler.h"
 #include "shell.h"
@@ -53,6 +54,7 @@ static struct idt_pointer idt_pointer_value;
 static volatile uint64_t tick_count;
 
 extern void fpu_enable(void);
+extern uint8_t gfx_buffer_end[];
 extern void *isr_table[32];
 extern void *irq_table[16];
 extern void isr255(void);
@@ -638,6 +640,42 @@ struct __attribute__((packed)) multiboot_mmap_entry {
 
 #define MULTIBOOT_MEMORY_AVAILABLE 1
 
+static const void *map_tag_location(uint32_t *out_length)
+{
+    const uint8_t *cursor;
+
+    if (multiboot_address == 0U) {
+        return 0;
+    }
+    cursor = (const uint8_t *)(uintptr_t)multiboot_address + 8U;
+    for (;;) {
+        const struct multiboot_tag *tag =
+            (const struct multiboot_tag *)(const void *)cursor;
+        uint32_t size = tag->size;
+
+        if (tag->type == 0U || size < 8U) {
+            break;
+        }
+        if (tag->type == 6U && size >= 16U) {
+            const struct multiboot_tag_mmap *mmap =
+                (const struct multiboot_tag_mmap *)(const void *)tag;
+            const uint8_t *entries = (const uint8_t *)(const void *)(mmap + 1);
+            uint32_t stride = mmap->entry_size;
+
+            if (stride < sizeof(struct multiboot_mmap_entry)) {
+                stride = (uint32_t)sizeof(struct multiboot_mmap_entry);
+            }
+            if (out_length != 0) {
+                *out_length =
+                    (uint32_t)(cursor + size - entries) / stride * stride;
+            }
+            return entries;
+        }
+        cursor += (size + 7U) & ~7U;
+    }
+    return 0;
+}
+
 static uint64_t map_tag_total(void)
 {
     const uint8_t *cursor;
@@ -711,6 +749,25 @@ void kernel_main(uint64_t framebuffer_address, uint32_t pitch,
         post_line("       multiboot memory map unavailable\n");
     }
     post("MEMORY MAP", "OK");
+    {
+        uint32_t map_length = 0;
+        const void *map = map_tag_location(&map_length);
+
+        if (map != 0) {
+            heap_init(map, map_length, (uint64_t)(uintptr_t)&gfx_buffer_end);
+            if (heap_ready()) {
+                post("HEAP", "OK");
+                post_number("  ", heap_total_bytes(), " bytes in ");
+                post_number("", (uint32_t)heap_page_count(), " pages\n");
+            } else {
+                post("HEAP", "SKIP");
+                post_line("       not enough memory above the kernel image\n");
+            }
+        } else {
+            post("HEAP", "SKIP");
+            post_line("       no memory map\n");
+        }
+    }
 
     gdt_init();
     post("GLOBAL DESCRIPTOR TABLE", "OK");

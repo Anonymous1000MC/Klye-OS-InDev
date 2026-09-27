@@ -6,6 +6,7 @@
 #include "gfx.h"
 #include "input.h"
 #include "io.h"
+#include "heap.h"
 #include "kby.h"
 #include "kas.h"
 #include "launcher.h"
@@ -653,6 +654,112 @@ static void cmd_df(void)
     terminal_puts("%   /\n");
 }
 
+
+/* Exercises the allocator: many sizes, free everything, then reallocate in
+ * random-ish order and confirm the data survived.  Lua's collector depends on
+ * free() actually returning memory. */
+static void cmd_heapcheck(void)
+{
+    static void *slots[64];
+    uint32_t seed = 12345U;
+    int failures = 0;
+
+    for (int round = 0; round < 3; ++round) {
+        for (int index = 0; index < 64; ++index) {
+            seed = seed * 1103515245U + 12345U;
+            slots[index] = heap_malloc(16U + (seed >> 16) % 4096U);
+            if (slots[index] == 0) {
+                terminal_puts("heapcheck: allocation failed at ");
+                shell_printf_u64((uint64_t)index);
+                terminal_puts("\n");
+                ++failures;
+                slots[index] = 0;
+                continue;
+            }
+            __builtin_memset(slots[index], (int)(index + 1), 16U);
+        }
+        for (int index = 0; index < 64; ++index) {
+            if (slots[index] == 0) {
+                continue;
+            }
+            if (((uint8_t *)(uintptr_t)slots[index])[0] != (uint8_t)(index + 1) ||
+                ((uint8_t *)(uintptr_t)slots[index])[15] != (uint8_t)(index + 1)) {
+                ++failures;
+            }
+            heap_free(slots[index]);
+        }
+    }
+    /* realloc must preserve the old contents */
+    for (int index = 0; index < 16; ++index) {
+        uint8_t *block = (uint8_t *)(uintptr_t)heap_malloc(32);
+
+        if (block == 0) {
+            ++failures;
+            continue;
+        }
+        for (int at = 0; at < 32; ++at) {
+            block[at] = (uint8_t)(at + 1);
+        }
+        block = (uint8_t *)(uintptr_t)heap_realloc(block, 4096);
+        if (block == 0) {
+            ++failures;
+            continue;
+        }
+        for (int at = 0; at < 32; ++at) {
+            if (block[at] != (uint8_t)(at + 1)) {
+                ++failures;
+                break;
+            }
+        }
+        heap_free(block);
+    }
+    /* calloc must zero */
+    {
+        uint8_t *zeroed = (uint8_t *)(uintptr_t)heap_calloc(256, 4);
+
+        if (zeroed == 0) {
+            ++failures;
+        } else {
+            for (int at = 0; at < 1024; ++at) {
+                if (zeroed[at] != 0U) {
+                    ++failures;
+                    break;
+                }
+            }
+            heap_free(zeroed);
+        }
+    }
+    /* raw pages, then hand them back */
+    {
+        void *raw[8];
+        int taken = 0;
+
+        for (int index = 0; index < 8; ++index) {
+            raw[index] = heap_alloc_pages(4096U * 4U);
+            if (raw[index] != 0) {
+                ++taken;
+                __builtin_memset(raw[index], 0xAB, 4096U * 4U);
+            }
+        }
+        for (int index = 0; index < 8; ++index) {
+            if (raw[index] != 0) {
+                heap_free_pages(raw[index], 4096U * 4U);
+            }
+        }
+        terminal_puts("heapcheck: 4 page runs, ");
+        shell_printf_u64((uint64_t)taken);
+        terminal_puts(" granted\n");
+    }
+    terminal_puts("heapcheck: ");
+    if (failures == 0) {
+        terminal_puts("PASS\n");
+    } else {
+        terminal_puts("FAIL, ");
+        shell_printf_u64((uint64_t)failures);
+        terminal_puts(" problems\n");
+    }
+}
+
 static void cmd_free(void)
 {
     terminal_puts("              total        used        free\n");
@@ -661,6 +768,20 @@ static void cmd_free(void)
     terminal_puts("M       ");
     terminal_printf_number((uint64_t)gfx_alloc_bytes_used() / (1024U * 1024U));
     terminal_puts("M\n");
+    terminal_puts("heap:     ");
+    shell_printf_u64((uint64_t)heap_total_bytes() / (1024U * 1024U));
+    terminal_puts("M pool, ");
+    shell_printf_u64((uint64_t)heap_free_bytes() / (1024U * 1024U));
+    terminal_puts("M free, ");
+    shell_printf_u64((uint64_t)heap_live_bytes() / 1024U);
+    terminal_puts("K live\n");
+    terminal_puts("pages:    ");
+    shell_printf_u64((uint64_t)heap_page_count());
+    terminal_puts(" total, ");
+    shell_printf_u64((uint64_t)heap_free_page_count());
+    terminal_puts(" free, largest block ");
+    shell_printf_u64((uint64_t)heap_largest_block() / 1024U);
+    terminal_puts("K\n");
     terminal_puts("frames:   ");
     shell_printf_u64((uint64_t)gfx_present_count());
     terminal_puts(" presented, ");
@@ -1839,6 +1960,8 @@ void shell_execute(const char *line)
             return;
         }
         shell_run_app(argument);
+    } else if (text_equal(tokens[0], "heapcheck")) {
+        cmd_heapcheck();
     } else if (text_equal(tokens[0], "kpm")) {
         cmd_kpm(tokens, count);
     } else if (text_equal(tokens[0], "man") || text_equal(tokens[0], "help2")) {
