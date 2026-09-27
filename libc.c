@@ -760,13 +760,78 @@ int vsnprintf(char *buffer, size_t size, const char *format, va_list arguments)
                 double fraction = normalised - (double)lead;
                 uint8_t digits[48];
 
-                for (int index = 0; index < decimals && index < 48; ++index) {
-                    fraction *= 10.0;
-                    digits[index] = (uint8_t)(uint64_t)fraction;
-                    fraction -= (double)digits[index];
+                /* Scale the original magnitude in one step rather than
+                 * walking the normalised value a digit at a time.  Dividing
+                 * 1234.5 by ten three times leaves 1.23450000000000015277, so
+                 * an exact tie stopped looking like one and %.3e printed
+                 * 1.235e+03 where glibc prints 1.234e+03.  Scaling the
+                 * untouched value keeps the tie exact whenever the value has a
+                 * short decimal expansion, which is the common case. */
+                {
+                    /* a double carries about 17 significant decimal digits, so
+                     * more than 18 fraction digits is noise, and capping also
+                     * keeps the scaled value inside uint64 range */
+                    int take = decimals > 18 ? 18 : decimals;
+                    int shift = take - exponent;
+                    double scaled = magnitude;
+                    uint64_t whole;
+                    char reversed[24];
+                    int length = 0;
+
+                    for (int step = 0; step < shift && step < 320; ++step) {
+                        scaled *= 10.0;
+                    }
+                    for (int step = 0; step > shift && step > -320; --step) {
+                        scaled /= 10.0;
+                    }
+                    if (!(scaled < 1.0e19)) {
+                        scaled = 1.0e19;
+                    }
+                    whole = (uint64_t)scaled;
+                    fraction = scaled - (double)whole;
+                    while (whole > 0) {
+                        reversed[length++] = (char)('0' + (int)(whole % 10));
+                        whole /= 10;
+                    }
+                    if (length == 0) {
+                        reversed[length++] = '0';
+                    }
+                    lead = (uint64_t)(reversed[length - 1] - '0');
+                    for (int index = 0; index < take; ++index) {
+                        int at = length - 2 - index;
+
+                        digits[index] = at >= 0 ? (uint8_t)(reversed[at] - '0')
+                                                : 0;
+                    }
+                    if (take != decimals) {
+                        /* pad the digits we refused to compute */
+                        for (int index = take; index < decimals; ++index) {
+                            digits[index] = 0;
+                        }
+                    }
                 }
-                if (decimals > 0 && decimals <= 48) {
-                    int carry = fraction * 10.0 >= 0.5 ? 1 : 0;
+                if (decimals <= 48) {
+                    /* fraction is the leftover in [0,1), so it is already the
+                     * round-half threshold.  Comparing fraction * 10.0 against
+                     * 0.5 instead tested the next *digit* against 0.5, so any
+                     * next digit of 1 or more rounded up: %.1e of 0.000123
+                     * printed 1.3e-04 because the digit after the 2 was a 3.
+                     *
+                     * This has to run for decimals == 0 too, otherwise %.0e
+                     * simply truncated: 9.5 printed 9e+00 instead of 1e+01. */
+                    int last = decimals > 0 ? digits[decimals - 1]
+                                            : (int)(lead % 10);
+                    int carry;
+
+                    if (fraction > 0.5) {
+                        carry = 1;
+                    } else if (fraction < 0.5) {
+                        carry = 0;
+                    } else {
+                        /* exact tie: round half to even, the way glibc does,
+                         * so %.3e of 1234.5 is 1.234e+03 and not 1.235e+03 */
+                        carry = (last % 2) != 0 ? 1 : 0;
+                    }
 
                     for (int index = decimals - 1; index >= 0 && carry != 0;
                          --index) {
@@ -780,6 +845,13 @@ int vsnprintf(char *buffer, size_t size, const char *format, va_list arguments)
                     }
                     if (carry != 0) {
                         lead += 1;
+                    }
+                    if (lead >= 10) {
+                        /* the lead digit has to stay one digit wide, so the
+                         * carry moves into the exponent: %.1e of 0.000999
+                         * printed 10.0e-04 instead of 1.0e-03 */
+                        lead /= 10;
+                        exponent += 1;
                     }
                 }
                 sink_number(&inner, lead, 10, false, false, -1, false, false,
@@ -802,12 +874,18 @@ int vsnprintf(char *buffer, size_t size, const char *format, va_list arguments)
                     fraction -= (double)digits[index];
                 }
                 /* Round the last digit rather than truncating, otherwise
-                 * 1414/1000 prints as 1.4139999999999. */
-                if (decimals > 0 && decimals <= 48) {
+                 * 1414/1000 prints as 1.4139999999999.  This has to run for
+                 * decimals == 0 as well: %.0f was truncating, so 9.5 printed
+                 * 9 and 12345.6789 printed 12345. */
+                if (decimals <= 48) {
+                    int last = decimals > 0 ? digits[decimals - 1]
+                                            : (int)(integral % 10);
                     int carry = 0;
 
-                    if (fraction * 10.0 >= 0.5) {
+                    if (fraction > 0.5) {
                         carry = 1;
+                    } else if (fraction == 0.5) {
+                        carry = (last % 2) != 0 ? 1 : 0;
                     }
                     for (int index = decimals - 1; index >= 0 && carry != 0;
                          --index) {
@@ -883,11 +961,20 @@ int vsnprintf(char *buffer, size_t size, const char *format, va_list arguments)
                         cut = point_index;
                     }
                 }
-                if (exponent_index >= 0 && cut < exponent_index) {
-                    for (int index = exponent_index; index < length; ++index) {
-                        scratch[cut + (index - exponent_index)] = scratch[index];
+                if (exponent_index >= 0) {
+                    if (cut < exponent_index) {
+                        for (int index = exponent_index; index < length;
+                             ++index) {
+                            scratch[cut + (index - exponent_index)] =
+                                scratch[index];
+                        }
+                        inner.used = (size_t)(cut + (length - exponent_index));
+                    } else {
+                        /* nothing to strip, and the exponent must survive:
+                         * truncating to cut here dropped it, so %.1g of
+                         * 6.02e+23 printed "6" instead of "6e+23" */
+                        inner.used = (size_t)length;
                     }
-                    inner.used = (size_t)(cut + (length - exponent_index));
                 } else {
                     inner.used = (size_t)cut;
                 }

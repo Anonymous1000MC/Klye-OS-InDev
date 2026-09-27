@@ -19,6 +19,13 @@ the heap and timer entry points that `libc.c` now calls into.
 The printf expectations were taken from glibc so the kernel's hand written
 formatter stays compatible with what Lua expects.
 
+`fmt_diff.c` is a differential test: it holds the kernel's formatter and
+glibc's in the same binary and compares 1440 value/format pairs. 63 of them
+still disagree, all for reasons that need exact big-integer decimal
+conversion; the file explains both classes. It fails only when the count goes
+*above* that baseline, so the known gaps stay visible without blocking work
+while a regression is still caught.
+
 `tools/qemu_harness.py` boots the ISO under QEMU and drives it over QMP:
 `Guest.boot()` waits for the desktop, `run([...])` types commands into the
 terminal, `gdb([...])` reads guest symbols, and `ppm_pixel`/`ppm_count` inspect

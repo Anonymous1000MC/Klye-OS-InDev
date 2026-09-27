@@ -141,9 +141,16 @@ class Guest:
         return self
 
     # --------------------------------------------------------------- gdb --
+    # gdb collapses a run of 4 or more identical characters into
+    # "'3' <repeats 14 times>", which any regex reading the string back has to
+    # undo.  Turning the collapsing off keeps `print` output literal, so a
+    # terminal line comes back as one quoted string.  Without this, lines()
+    # silently truncated at the first repeated run: 1/3 read back as "0."
+    GDB_PRELUDE = ['-ex', 'set print repeats 0']
+
     def gdb(self, exprs, timeout=120):
-        args = ['gdb', '-batch', '-nx',
-                '-ex', 'target remote ' + self.gdb_path]
+        args = ['gdb', '-batch', '-nx'] + self.GDB_PRELUDE + [
+            '-ex', 'target remote ' + self.gdb_path]
         for e in exprs:
             args += ['-ex', 'print ' + e]
         args += ['-ex', 'detach', ELF]
@@ -152,10 +159,10 @@ class Guest:
 
     def gdb_raw(self, expr, timeout=120):
         """Run one expression and return the raw gdb stdout."""
-        args = ['gdb', '-batch', '-nx',
-                '-ex', 'target remote ' + self.gdb_path,
-                '-ex', expr,
-                '-ex', 'detach', ELF]
+        args = ['gdb', '-batch', '-nx'] + self.GDB_PRELUDE + [
+            '-ex', 'target remote ' + self.gdb_path,
+            '-ex', expr,
+            '-ex', 'detach', ELF]
         return subprocess.run(args, capture_output=True, text=True,
                               timeout=timeout).stdout
 
@@ -204,7 +211,11 @@ class Guest:
             n = int(m.group(1))
             body = line.split('=', 1)[1].strip()
             m2 = re.match(r'^"((?:[^"\\]|\\.)*)"', body)
-            texts[n] = m2.group(1) if m2 else ''
+            if not m2:
+                continue
+            # with `set print repeats 0` the whole array comes back as one
+            # string, NUL padding included, so drop the padding
+            texts[n] = re.sub(r'(?:\\000)+$', '', m2.group(1))
         return ['%3d | %s' % (first + i, texts.get(i + 1, ''))
                 for i in range(count)]
 

@@ -31,6 +31,20 @@ objcopy \
     --redefine-sym __ctype_toupper_loc=klibc_ctype_toupper_loc \
     "$out/libc.o" "$out/libc_renamed.o"
 
+# a second copy with snprintf renamed, so the differential test can hold the
+# kernel's formatter and glibc's in the same binary and compare them
+objcopy \
+    --redefine-sym printf=klibc_printf \
+    --redefine-sym stdout=klibc_stdout \
+    --redefine-sym stderr=klibc_stderr \
+    --redefine-sym stdin=klibc_stdin \
+    --redefine-sym __errno_location=klibc_errno_location \
+    --redefine-sym __ctype_b_loc=klibc_ctype_b_loc \
+    --redefine-sym __ctype_tolower_loc=klibc_ctype_tolower_loc \
+    --redefine-sym __ctype_toupper_loc=klibc_ctype_toupper_loc \
+    --redefine-sym snprintf=ksnprintf \
+    "$out/libc.o" "$out/libc_diff.o"
+
 status=0
 for t in libc_test math_test float_test; do
     if [ ! -f "$here/$t.c" ]; then
@@ -45,4 +59,13 @@ for t in libc_test math_test float_test; do
         status=1
     fi
 done
+
+# differential test against glibc; see the comment in fmt_diff.c for the two
+# known classes of disagreement and why the baseline is not zero
+$cc $cflags -c "$here/fmt_diff.c" -o "$out/fmt_diff.o"
+$cc "$out/libc_diff.o" "$out/stubs.o" "$out/fmt_diff.o" -o "$out/fmt_diff" -lm
+if ! "$out/fmt_diff"; then
+    echo "fmt_diff FAILED"
+    status=1
+fi
 exit $status
