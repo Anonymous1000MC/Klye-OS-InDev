@@ -12,11 +12,11 @@ KERNEL := $(BUILD_DIR)/klye.elf
 CPPFLAGS := -Iinclude
 CFLAGS := -std=c11 -O2 -g -ffreestanding -fno-stack-protector \
           -fno-builtin -fno-pic -mno-red-zone -mcmodel=kernel \
-          -mno-sse -mno-sse2 -mno-mmx -mno-80387 \
+          -msse -mfpmath=sse -mno-80387 \
           -fomit-frame-pointer -fno-unwind-tables -fno-asynchronous-unwind-tables \
           -Wall -Wextra -Werror
 ASFLAGS := -ffreestanding -fno-stack-protector -fno-pic -mno-red-zone \
-           -mno-sse -mno-sse2 -mno-mmx -mno-80387
+           -mno-80387
 LDFLAGS := -nostdlib -no-pie -Wl,-T,linker.ld -Wl,--gc-sections \
            -Wl,-z,max-page-size=0x1000 -Wl,-z,noexecstack
 NASMFLAGS := -f elf64 -g -F dwarf
@@ -27,8 +27,8 @@ ROOTFS := rootfs
 TOOLS := $(BUILD_DIR)/tools
 VFS_IMAGE := $(BUILD_DIR)/vfs_image.c
 
-C_SOURCES := kernel.c scheduler.c mem.c gfx.c font.c input.c vfs.c launcher.c kby.c kas.c apps.c shell.c wm.c gui.c
-ASM_SOURCES := interrupts.S context.S
+C_SOURCES := kernel.c scheduler.c mem.c libc.c gfx.c font.c input.c vfs.c launcher.c kby.c kas.c apps.c shell.c wm.c gui.c
+ASM_SOURCES := interrupts.S context.S fpu.S
 OBJECTS := $(addprefix $(BUILD_DIR)/,$(C_SOURCES:.c=.o)) \
            $(addprefix $(BUILD_DIR)/,$(ASM_SOURCES:.S=.o)) \
            $(BUILD_DIR)/vfs_image.o \

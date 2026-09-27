@@ -52,6 +52,7 @@ static struct idt_descriptor idt[256];
 static struct idt_pointer idt_pointer_value;
 static volatile uint64_t tick_count;
 
+extern void fpu_enable(void);
 extern void *isr_table[32];
 extern void *irq_table[16];
 extern void isr255(void);
@@ -691,6 +692,7 @@ void kernel_main(uint64_t framebuffer_address, uint32_t pitch,
     bool video = framebuffer_address != 0U && bpp == 32U;
 
     serial_init();
+    fpu_enable();
     post_line("Klye OS 0.2\n");
     console_enabled = video;
     if (video) {
@@ -714,6 +716,7 @@ void kernel_main(uint64_t framebuffer_address, uint32_t pitch,
     post("GLOBAL DESCRIPTOR TABLE", "OK");
     idt_init();
     post("INTERRUPT DESCRIPTOR TABLE", "OK");
+    post("SSE / FLOATING POINT", "OK");
 
     scheduler_init(boot_stack);
     post("TASK SCHEDULER", "OK");

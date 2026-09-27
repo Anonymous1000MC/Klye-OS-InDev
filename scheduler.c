@@ -7,13 +7,23 @@
 #define TASK_LIMIT 8
 #define TASK_STACK_SIZE 16384
 
+/* 512 byte FXSAVE area: control word, MXCSR, the x87 stack and XMM0-15.
+ * Required because libc and the Lua runtime use SSE for double arithmetic, so
+ * a task switch in the middle of a floating point expression must not lose
+ * the register contents. */
+#define TASK_FPU_BYTES 512
+
 struct task {
     struct interrupt_registers registers;
     struct cpu_frame frame;
     task_function function;
     uint64_t argument;
+    uint8_t fpu[TASK_FPU_BYTES] __attribute__((aligned(16)));
     bool ready;
 };
+
+extern void task_fpu_save(uint8_t *area);
+extern void task_fpu_restore(const uint8_t *area);
 
 extern __attribute__((noreturn)) void task_context_restore(
     struct interrupt_registers *registers, struct cpu_frame *frame);
@@ -97,6 +107,7 @@ void scheduler_on_interrupt(struct interrupt_registers *registers,
     }
 
     current = &tasks[current_task_index];
+    task_fpu_save(current->fpu);
     current->registers = *registers;
     current->frame = *frame;
     current->frame.rflags |= 1U << 9;
@@ -108,6 +119,7 @@ void scheduler_on_interrupt(struct interrupt_registers *registers,
     }
 
     current_task_index = next;
+    task_fpu_restore(tasks[next].fpu);
     task_context_restore(&tasks[next].registers, &tasks[next].frame);
 }
 
