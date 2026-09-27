@@ -12,6 +12,8 @@
 #define KBY_MAX_CODE 4096U
 #define KBY_STACK_SLOTS 64
 #define KBY_VARS 32
+#define KBY_KEYS 16
+#define KBY_WIN_MAX 4
 #define KBY_MAX_APPS 6
 #define KBY_BUDGET 2000000U
 #define KBY_NAME_MAX 32
@@ -58,8 +60,16 @@ enum kby_opcode {
     KBY_OP_VFS_WRITE = 0x53,
     KBY_OP_VFS_APPEND = 0x54,
 
+    KBY_OP_KEY_POLL = 0x61,
+    KBY_OP_MOUSE_X = 0x62,
+    KBY_OP_MOUSE_Y = 0x63,
+    KBY_OP_MOUSE_DOWN = 0x64,
+    KBY_OP_FRAME = 0x67,
     KBY_OP_TICKS = 0x60,
-    KBY_OP_NUM = 0x66
+    KBY_OP_NUM = 0x66,
+    KBY_OP_WIN_OPEN = 0x68,
+    KBY_OP_WIN_CLOSE = 0x69,
+    KBY_OP_VSYNC = 0x6A
 };
 
 struct kby_app;
@@ -71,6 +81,14 @@ int kby_app_count(void);
 struct kby_app *kby_app_at(int index);
 struct kby_app *kby_find(const char *name);
 int kby_app_slot(struct kby_app *app);
+
+/* input delivery from the window manager */
+void kby_push_key(struct kby_app *app, uint32_t code, bool pressed);
+void kby_set_mouse(struct kby_app *app, int x, int y, bool down);
+
+/* window control from inside a script */
+bool kby_open_window(const char *title, int width, int height);
+void kby_close_self(void);
 
 bool kby_run(struct kby_app *app, uint32_t budget);
 void kby_flush_output(struct kby_app *app);

@@ -176,6 +176,14 @@ static const struct opdef opcodes[] = {
     { ".vfs_write", 0, 0x53 },
     { ".vfs_append", 0, 0x54 },
     { ".ticks", 0, 0x60 },
+    { ".key_poll", 0, 0x61 },
+    { ".mouse_x", 0, 0x62 },
+    { ".mouse_y", 0, 0x63 },
+    { ".mouse_down", 0, 0x64 },
+    { ".frame", 0, 0x67 },
+    { ".win_open", 8, 0x68 },
+    { ".win_close", 0, 0x69 },
+    { ".vsync", 0, 0x6A },
     { ".num", 0, 0x66 },
     { 0, 0, 0 }
 };

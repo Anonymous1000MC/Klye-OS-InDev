@@ -1584,6 +1584,42 @@ void wm_launch_script(int script_index, const char *title, int width,
     (void)title;
 }
 
+static int script_self_slot = -1;
+
+bool kby_open_window(const char *title, int width, int height)
+{
+    struct kby_app *app = kby_find(title);
+
+    if (app == 0) {
+        return false;
+    }
+    script_self_slot = kby_app_slot(app);
+    wm_launch_script(script_self_slot, title, width, height);
+    return true;
+}
+
+void kby_close_self(void)
+{
+    if (script_self_slot < 0) {
+        return;
+    }
+    {
+        int slot = -1;
+
+        for (int index = 0; index < WM_WINDOW_LIMIT; ++index) {
+            if (wm.windows[index].used != 0 &&
+                wm.windows[index].script == script_self_slot) {
+                slot = index;
+                break;
+            }
+        }
+        if (slot >= 0) {
+            close_window(slot);
+        }
+    }
+    script_self_slot = -1;
+}
+
 void wm_launch_app(enum app_id app)
 {
     int existing = find_window_for_app(app);
@@ -2031,6 +2067,11 @@ static void handle_key(const struct key_event *event)
     if (wm.focused >= 0) {
         int app = wm.windows[wm.focused].app;
 
+        if (wm.windows[wm.focused].script >= 0) {
+            kby_push_key(kby_app_at(wm.windows[wm.focused].script), event->code,
+                         event->pressed != 0U);
+            return;
+        }
         wm.heartbeat[app] = pit_ticks();
         if (app == APP_TERMINAL) {
             terminal_handle_key(event);
@@ -2254,9 +2295,17 @@ static void service_scripts(void)
             continue;
         }
         app = kby_app_at(wm.windows[index].script);
-        if (kby_app_loaded(app) == false) {
+        if (app == 0) {
             continue;
         }
+        kby_set_mouse(app, wm.mouse_x - wm.windows[index].x,
+                      wm.mouse_y - wm.windows[index].y - THEME_TITLEBAR_HEIGHT,
+                      (wm.mouse_buttons & MOUSE_BUTTON_LEFT) != 0U);
+        if (kby_app_loaded(app) == false) {
+            /* halted programs keep their final frame on screen */
+            continue;
+        }
+        kby_clear_display(app);
         kby_run(app, KBY_BUDGET);
         if (kby_app_loaded(app)) {
             wm.windows[index].content_dirty = 1;

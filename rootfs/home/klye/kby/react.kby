@@ -1,0 +1,58 @@
+# react.kby - proves keyboard and mouse delivery to a script window
+# a frame loop repaints continuously and reacts to input
+# every draw op takes its colour from the stack, pushed first
+# frame locals persist across .vsync, so var 0 latches the key press
+
+.push32 0xFF232B3D
+.rect 0 0 520 380
+
+@loop
+  # latch the first key press into var 0
+  .key_poll
+  .push32 0
+  .cmp
+  .jz @nokey
+  .push32 1
+  .store 0
+@nokey
+
+  # background is green from the moment a key arrives
+  .load 0
+  .push32 0
+  .cmp
+  .jnz @green
+  .push32 0xFF232B3D
+  .jmp @paint
+@green
+  .push32 0xFF1B3A2E
+
+@paint
+  .clear
+
+  .push32 0xFF6FD3FF
+  .rounded 24 20 150 34 6
+  .push32 0xFF10202C
+  .text 44 42 "live input"
+
+  .push32 0xFFE8EAF0
+  .text 24 74 "move the mouse and click"
+  .push32 0xFFE8EAF0
+  .text 24 94 "press any key to turn me green"
+  .push32 0xFF8B95A8
+  .text 24 114 "locals survive across frames"
+
+  # the footer follows the left mouse button, live
+  .mouse_down
+  .push32 0
+  .cmp
+  .jz @notdown
+  .push32 0xFF6FD3FF
+  .text 24 334 "button down"
+  .jmp @done
+@notdown
+  .push32 0xFF8B95A8
+  .text 24 334 "button up"
+
+@done
+  .vsync
+  .jmp @loop

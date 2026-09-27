@@ -30,6 +30,12 @@ struct kby_cmd {
 };
 
 struct kby_app {
+    uint32_t keys[KBY_KEYS];
+    int key_head;
+    int key_tail;
+    int mouse_x;
+    int mouse_y;
+    bool mouse_down;
     char scratch[KBY_CMD_TEXT];
     int scratch_len;
     bool used;
@@ -57,6 +63,8 @@ struct kby_app {
     bool has_result;
     uint32_t steps;
     uint32_t slices;
+    uint32_t frames;
+    bool yielded;
 };
 
 static struct kby_app apps[KBY_MAX_APPS];
@@ -122,7 +130,9 @@ static void emit_colour(struct kby_app *app, uint8_t op, int32_t a, int32_t b,
     int index = 0;
 
     if (app->list_count >= KBY_LIST_MAX) {
-        fail(app, "display list full");
+        /* the frame is full: yield to the compositor instead of dying, so a
+         * program that forgot .vsync still animates */
+        app->yielded = true;
         return;
     }
     cmd = &app->list[app->list_count++];
@@ -296,6 +306,13 @@ struct kby_app *kby_load(const char *name, const uint8_t *code, uint32_t length)
     slot->call_depth = 0U;
     slot->sp = 0;
     slot->arena_used = 0;
+    slot->frames = 0U;
+    slot->yielded = false;
+    slot->key_head = 0;
+    slot->key_tail = 0;
+    slot->mouse_x = 0;
+    slot->mouse_y = 0;
+    slot->mouse_down = false;
     kby_out_len = 0;
     kby_out[0] = 0;
     slot->list_count = 0;
@@ -350,6 +367,31 @@ struct kby_app *kby_app_at(int index)
         return 0;
     }
     return &apps[index];
+}
+
+void kby_push_key(struct kby_app *app, uint32_t code, bool pressed)
+{
+    int next;
+
+    if (app == 0 || pressed == false) {
+        return;
+    }
+    next = (app->key_tail + 1) % KBY_KEYS;
+    if (next == app->key_head) {
+        return;
+    }
+    app->keys[app->key_tail] = code;
+    app->key_tail = next;
+}
+
+void kby_set_mouse(struct kby_app *app, int x, int y, bool down)
+{
+    if (app == 0) {
+        return;
+    }
+    app->mouse_x = x;
+    app->mouse_y = y;
+    app->mouse_down = down;
 }
 
 int kby_app_slot(struct kby_app *app)
@@ -410,7 +452,14 @@ bool kby_run(struct kby_app *app, uint32_t budget)
     if (!kby_app_loaded(app)) {
         return false;
     }
+    app->yielded = false;
+    /* the string arena only backs transient encodings: draw commands copy
+     * their text into the command itself, so it resets every frame */
+    app->arena_used = 0;
     while (spent < budget) {
+        if (app->yielded) {
+            break;
+        }
         uint32_t opcode;
 
         if (!fetch8(app, &opcode)) {
@@ -654,9 +703,15 @@ bool kby_run(struct kby_app *app, uint32_t budget)
             break;
         }
 
-        case KBY_OP_DRAW_CLEAR:
-            emit(app, opcode, 0, 0, 0, 0, 0);
+        case KBY_OP_DRAW_CLEAR: {
+            int32_t colour;
+
+            if (!pop(app, &colour)) {
+                return false;
+            }
+            emit_colour(app, opcode, 0, 0, 0, 0, 0, (uint32_t)colour);
             break;
+        }
         case KBY_OP_DRAW_RECT:
         case KBY_OP_DRAW_ROUNDED:
         case KBY_OP_DRAW_BORDER: {
@@ -895,6 +950,57 @@ bool kby_run(struct kby_app *app, uint32_t budget)
             app->arena_used += KBY_ARENA_SLOT;
             break;
         }
+        case KBY_OP_KEY_POLL: {
+            if (app->key_head == app->key_tail) {
+                push(app, -1);
+            } else {
+                push(app, (int32_t)app->keys[app->key_head]);
+                app->key_head = (app->key_head + 1) % KBY_KEYS;
+            }
+            break;
+        }
+        case KBY_OP_MOUSE_X:
+            push(app, app->mouse_x);
+            break;
+        case KBY_OP_MOUSE_Y:
+            push(app, app->mouse_y);
+            break;
+        case KBY_OP_MOUSE_DOWN:
+            push(app, app->mouse_down ? 1 : 0);
+            break;
+        case KBY_OP_VSYNC:
+            ++app->frames;
+            app->yielded = true;
+            break;
+        case KBY_OP_FRAME:
+            push(app, (int32_t)app->frames);
+            break;
+        case KBY_OP_WIN_OPEN: {
+            const char *title;
+            int32_t values[2];
+            uint32_t count = 0;
+            uint32_t raw;
+
+            if (!fetch32(app, &count) || count != 2U) {
+                fail(app, "win_open: bad operand count");
+                return false;
+            }
+            for (uint32_t index = 0; index < count; ++index) {
+                if (!fetch32(app, &raw)) {
+                    return false;
+                }
+                values[index] = (int32_t)raw;
+            }
+            title = fetch_str(app, 0);
+            if (title == 0) {
+                return false;
+            }
+            push(app, kby_open_window(title, values[0], values[1]) ? 1 : 0);
+            break;
+        }
+        case KBY_OP_WIN_CLOSE:
+            kby_close_self();
+            break;
         case KBY_OP_TICKS: {
             extern uint64_t pit_ticks(void);
 
@@ -961,6 +1067,9 @@ bool kby_run(struct kby_app *app, uint32_t budget)
         if (app->dead) {
             return false;
         }
+        if (app->yielded) {
+            return true;
+        }
     }
     return true;
 }
@@ -995,7 +1104,11 @@ void kby_draw(struct kby_app *app, struct gfx_surface *surface, int x, int y,
 
         colour = cmd->colour;
         switch (cmd->op) {
+        case KBY_OP_DRAW_CLEAR:
+            gfx_fill(surface, 0, 0, surface->width, surface->height, colour);
+            break;
         case KBY_OP_FILL_HEX:
+            gfx_fill(surface, 0, 0, surface->width, surface->height, colour);
             break;
         case KBY_OP_DRAW_RECT:
             gfx_fill(surface, left, top, cmd->c, cmd->d, colour);
