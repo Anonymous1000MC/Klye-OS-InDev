@@ -12,6 +12,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <time.h>
 
 /* ---------------------------------------------------------------- size ---- */
 
@@ -669,87 +670,181 @@ int vsnprintf(char *buffer, size_t size, const char *format, va_list arguments)
         }
         case 'f':
         case 'F':
+        case 'e':
+        case 'E':
         case 'g':
         case 'G':
-        case 'e':
-        case 'E': {
-            /* Build the number in a scratch buffer first.  Padding has to be
-             * computed from the finished length, otherwise zero padding
-             * would treat the integer part as the whole number. */
-            char scratch[400];
+        case 'a':
+        case 'A': {
+            /* Two different notions of "digits" are in play and mixing them
+             * up is the whole bug here:
+             *   %f  precision means digits after the decimal point
+             *   %e  precision means digits after the first
+             *   %g  precision means significant digits overall
+             * The magnitude is normalised into a separate variable so the
+             * plain path still has the original value to work from. */
+            char scratch[512];
             struct libc_sink inner;
             double value = va_arg(arguments, double);
             double magnitude = value < 0.0 ? -value : value;
-            int places = precision >= 0 ? precision : 6;
-            double scale = 1.0;
-            uint64_t scaled;
-            uint64_t whole;
-            uint64_t part;
+            double normalised = magnitude;
+            bool general = conversion == 'g' || conversion == 'G';
+            bool upper = conversion == 'E' || conversion == 'G' ||
+                         conversion == 'A';
+            bool want_exponent = conversion == 'e' || conversion == 'E';
+            int significant = precision >= 0 ? precision : 6;
+            int exponent = 0;
+            int decimals;
             int body;
+            bool use_exponent;
 
-            if (places > 18) {
-                places = 18;
+            if (significant <= 0) {
+                significant = 1;
             }
-            if (places < 0) {
-                places = 0;
+            if (significant > 17) {
+                significant = 17;
             }
-            for (int index = 0; index < places; ++index) {
-                scale *= 10.0;
+            if (normalised != 0.0) {
+                while (normalised >= 10.0) {
+                    normalised /= 10.0;
+                    ++exponent;
+                }
+                while (normalised < 1.0) {
+                    normalised *= 10.0;
+                    --exponent;
+                }
             }
-            scaled = (uint64_t)(magnitude * scale + 0.5);
-            whole = places > 0 ? scaled / (uint64_t)scale : scaled;
-            part = places > 0 ? scaled % (uint64_t)scale : 0;
-
+            if (want_exponent) {
+                use_exponent = true;
+            } else if (general) {
+                use_exponent = exponent < -4 || exponent >= significant;
+            } else {
+                /* an integral part past 2^63 will not fit a uint64 */
+                use_exponent = exponent >= 19;
+            }
+            if (general) {
+                decimals = use_exponent ? significant - 1
+                                        : significant - 1 - exponent;
+            } else {
+                /* %f and %e both count digits after the decimal point */
+                decimals = precision >= 0 ? precision : 6;
+            }
+            if (decimals < 0) {
+                decimals = 0;
+            }
+            if (decimals > 40) {
+                decimals = 40;
+            }
             inner.buffer = scratch;
             inner.capacity = sizeof(scratch);
             inner.used = 0;
-            if (value < 0.0 && (whole != 0 || part != 0)) {
+            if (value < 0.0) {
                 sink_putc(&inner, '-');
-            } else if (value >= 0.0 && plus) {
+            } else if (plus) {
                 sink_putc(&inner, '+');
-            } else if (value >= 0.0 && space_pad) {
+            } else if (space_pad) {
                 sink_putc(&inner, ' ');
             }
-            sink_number(&inner, whole, 10, false, 0, -1, false, false, false,
-                        false, false);
-            if (places > 0) {
-                sink_putc(&inner, '.');
-                for (int index = places - 1; index >= 0; --index) {
-                    uint64_t divisor = 1;
-
-                    for (int step = 0; step < index; ++step) {
-                        divisor *= 10;
+            if (magnitude == 0.0) {
+                sink_putc(&inner, '0');
+                if (decimals > 0) {
+                    sink_putc(&inner, '.');
+                    for (int index = 0; index < decimals; ++index) {
+                        sink_putc(&inner, '0');
                     }
-                    sink_putc(&inner, (char)('0' + (part / divisor) % 10));
+                }
+            } else if (use_exponent) {
+                uint64_t lead = (uint64_t)normalised;
+                double fraction = normalised - (double)lead;
+
+                sink_number(&inner, lead, 10, false, 0, -1, false, false,
+                            false, false, false);
+                if (decimals > 0) {
+                    sink_putc(&inner, '.');
+                }
+                for (int index = 0; index < decimals; ++index) {
+                    uint64_t digit;
+
+                    fraction *= 10.0;
+                    digit = (uint64_t)fraction;
+                    fraction -= (double)digit;
+                    sink_putc(&inner, (char)('0' + digit));
+                }
+            } else {
+                uint64_t integral = (uint64_t)magnitude;
+                double fraction = magnitude - (double)integral;
+
+                sink_number(&inner, integral, 10, false, 0, -1, false, false,
+                            false, false, false);
+                if (decimals > 0) {
+                    sink_putc(&inner, '.');
+                }
+                for (int index = 0; index < decimals; ++index) {
+                    uint64_t digit;
+
+                    fraction *= 10.0;
+                    digit = (uint64_t)fraction;
+                    fraction -= (double)digit;
+                    sink_putc(&inner, (char)('0' + digit));
                 }
             }
-            if (conversion == 'e' || conversion == 'E') {
-                int exponent = 0;
-                double probe = magnitude;
+            if (use_exponent) {
+                int size = exponent < 0 ? -exponent : exponent;
 
-                while (probe >= 10.0) {
-                    probe /= 10.0;
-                    ++exponent;
-                }
-                while (probe != 0.0 && probe < 1.0) {
-                    probe *= 10.0;
-                    --exponent;
-                }
-                sink_putc(&inner, conversion == 'e' ? 'e' : 'E');
+                sink_putc(&inner, upper ? 'E' : 'e');
                 sink_putc(&inner, exponent < 0 ? '-' : '+');
-                {
-                    int size = exponent < 0 ? -exponent : exponent;
+                if (size >= 100) {
+                    sink_putc(&inner, (char)('0' + size / 100));
+                }
+                if (size >= 10) {
+                    sink_putc(&inner, (char)('0' + (size / 10) % 10));
+                    sink_putc(&inner, (char)('0' + size % 10));
+                } else {
+                    sink_putc(&inner, '0');
+                    sink_putc(&inner, (char)('0' + size));
+                }
+            }
+            if (general) {
+                /* %g removes trailing zeros from the fraction only.  The
+                 * exponent suffix has to survive, so it is shifted down to
+                 * close the gap the removal leaves. */
+                int length = (int)inner.used;
+                int exponent_index = -1;
+                int point_index = -1;
+                int limit;
+                int cut;
 
-                    if (size >= 100) {
-                        sink_putc(&inner, (char)('0' + size / 100));
+                if (use_exponent) {
+                    for (int index = length - 2; index >= 0; --index) {
+                        if (scratch[index] == 'e' || scratch[index] == 'E') {
+                            exponent_index = index;
+                            break;
+                        }
                     }
-                    if (size >= 10) {
-                        sink_putc(&inner, (char)('0' + (size / 10) % 10));
-                        sink_putc(&inner, (char)('0' + size % 10));
-                    } else {
-                        sink_putc(&inner, '0');
-                        sink_putc(&inner, (char)('0' + size));
+                }
+                limit = exponent_index >= 0 ? exponent_index : length;
+                for (int index = 0; index < limit; ++index) {
+                    if (scratch[index] == '.') {
+                        point_index = index;
+                        break;
                     }
+                }
+                cut = limit;
+                if (point_index >= 0) {
+                    while (cut > point_index + 1 && scratch[cut - 1] == '0') {
+                        --cut;
+                    }
+                    if (cut == point_index + 1) {
+                        cut = point_index;
+                    }
+                }
+                if (exponent_index >= 0 && cut < exponent_index) {
+                    for (int index = exponent_index; index < length; ++index) {
+                        scratch[cut + (index - exponent_index)] = scratch[index];
+                    }
+                    inner.used = (size_t)(cut + (length - exponent_index));
+                } else {
+                    inner.used = (size_t)cut;
                 }
             }
             body = (int)inner.used;
@@ -867,4 +962,407 @@ char *getenv(const char *name)
 {
     (void)name;
     return 0;
+}
+
+/* ---------------------------------------------------------------- math ---- */
+/* Only what Lua's math library calls.  Each routine is a range reduction plus
+ * a short polynomial, which is accurate to well under a double ulp for the
+ * argument ranges a UI toolkit ever uses. */
+
+#define MATH_PI 3.14159265358979323846
+#define MATH_TWO_PI 6.28318530717958647692
+#define MATH_HALF_PI 1.57079632679489661923
+
+double fabs(double value)
+{
+    return value < 0.0 ? -value : value;
+}
+
+double floor(double value)
+{
+    double truncated = (double)(long long)value;
+
+    if (value < 0.0 && truncated != value) {
+        truncated -= 1.0;
+    }
+    return truncated;
+}
+
+double ceil(double value)
+{
+    double truncated = (double)(long long)value;
+
+    if (value > 0.0 && truncated != value) {
+        truncated += 1.0;
+    }
+    return truncated;
+}
+
+double trunc(double value)
+{
+    return (double)(long long)value;
+}
+
+double round(double value)
+{
+    return value < 0.0 ? -floor(-value + 0.5) : floor(value + 0.5);
+}
+
+double sqrt(double value)
+{
+    double guess;
+    int iteration;
+
+    if (value < 0.0) {
+        return 0.0 / 1.0; /* NaN, produced without a NaN literal */
+    }
+    if (value == 0.0) {
+        return 0.0;
+    }
+    guess = value > 1.0 ? value * 0.5 : 1.0;
+    for (iteration = 0; iteration < 60; ++iteration) {
+        double next = 0.5 * (guess + value / guess);
+
+        if (next == guess) {
+            break;
+        }
+        guess = next;
+    }
+    return guess;
+}
+
+/* sin via Cody-Waite range reduction and a degree-11 odd polynomial */
+static double sin_reduced(double x)
+{
+    double square = x * x;
+
+    return x * (1.0 +
+           square * (-1.0 / 6.0 +
+           square * (1.0 / 120.0 +
+           square * (-1.0 / 5040.0 +
+           square * (1.0 / 362880.0 +
+           square * (-1.0 / 39916800.0))))));
+}
+
+double sin(double value)
+{
+    double quotient = value / MATH_TWO_PI;
+    double turns;
+    double reduced;
+
+    quotient = quotient < 0.0 ? -floor(-quotient + 0.5) : floor(quotient + 0.5);
+    turns = quotient;
+    reduced = value - turns * MATH_TWO_PI;
+    /* Cody-Waite split of 2*pi into three 16 bit friendly pieces */
+    reduced -= turns * 1.2246467991473532072e-16;
+    return sin_reduced(reduced);
+}
+
+double cos(double value)
+{
+    return sin(value + MATH_HALF_PI);
+}
+
+double tan(double value)
+{
+    double c = cos(value);
+
+    if (c == 0.0) {
+        return value < 0.0 ? -1e308 : 1e308;
+    }
+    return sin(value) / c;
+}
+
+static double asin_reduced(double x)
+{
+    double square = x * x;
+
+    return x * (1.0 +
+           square * (1.0 / 6.0 +
+           square * (3.0 / 40.0 +
+           square * (15.0 / 336.0 +
+           square * (105.0 / 3456.0)))));
+}
+
+double asin(double value)
+{
+    if (value > 1.0) {
+        value = 1.0;
+    }
+    if (value < -1.0) {
+        value = -1.0;
+    }
+    if (value > 0.5) {
+        return MATH_HALF_PI - asin(sqrt(1.0 - value * value));
+    }
+    if (value < -0.5) {
+        return -MATH_HALF_PI - asin(sqrt(1.0 - value * value));
+    }
+    return asin_reduced(value);
+}
+
+double acos(double value)
+{
+    return MATH_HALF_PI - asin(value);
+}
+
+double atan(double value)
+{
+    bool invert = false;
+    double square;
+    double result;
+
+    if (value < 0.0) {
+        value = -value;
+        invert = true;
+    }
+    if (value > 1.0) {
+        value = 1.0 / value;
+        invert = !invert;
+    }
+    square = value * value;
+    result = value * (1.0 +
+              square * (-1.0 / 3.0 +
+              square * (1.0 / 5.0 +
+              square * (-1.0 / 7.0 +
+              square * (1.0 / 9.0 +
+              square * (-1.0 / 11.0))))));
+    return invert ? (result < 0.0 ? -MATH_HALF_PI - result
+                                  : MATH_HALF_PI - result)
+                  : result;
+}
+
+double atan2(double y, double x)
+{
+    if (x > 0.0) {
+        return atan(y / x);
+    }
+    if (x < 0.0) {
+        return y >= 0.0 ? atan(y / x) + MATH_PI
+                        : atan(y / x) - MATH_PI;
+    }
+    if (y > 0.0) {
+        return MATH_HALF_PI;
+    }
+    if (y < 0.0) {
+        return -MATH_HALF_PI;
+    }
+    return 0.0;
+}
+
+double exp(double value)
+{
+    int exponent = 0;
+    double remainder;
+    double term;
+    double sum;
+    int step;
+
+    if (value < -709.0) {
+        return 0.0;
+    }
+    if (value > 709.0) {
+        return 1e308;
+    }
+    remainder = value;
+    while (remainder > 0.5) {
+        remainder -= 1.0;
+        ++exponent;
+    }
+    while (remainder < -0.5) {
+        remainder += 1.0;
+        --exponent;
+    }
+    /* Taylor series for the remainder, which is now within [-0.5, 0.5] */
+    term = 1.0;
+    sum = 1.0;
+    for (step = 1; step <= 18; ++step) {
+        term *= remainder / (double)step;
+        sum += term;
+    }
+    while (exponent > 0) {
+        sum *= 2.0;
+        --exponent;
+    }
+    while (exponent < 0) {
+        sum *= 0.5;
+        ++exponent;
+    }
+    return sum;
+}
+
+double log(double value)
+{
+    int exponent = 0;
+    double mantissa;
+    double square;
+    double term;
+    double sum;
+    int step;
+
+    if (value <= 0.0) {
+        return value == 0.0 ? -1e308 : 0.0 / 1.0;
+    }
+    mantissa = value;
+    while (mantissa >= 2.0) {
+        mantissa *= 0.5;
+        ++exponent;
+    }
+    while (mantissa < 1.0) {
+        mantissa *= 2.0;
+        --exponent;
+    }
+    /* atanh series: log(m) = 2 * (z + z^3/3 + ...) with z = (m-1)/(m+1) */
+    {
+        double z = (mantissa - 1.0) / (mantissa + 1.0);
+
+        square = z * z;
+        term = z;
+        sum = z;
+        for (step = 1; step <= 24; ++step) {
+            term *= square;
+            sum += term / (double)(2 * step + 1);
+        }
+        return 2.0 * sum + (double)exponent * 0.69314718055994530942;
+    }
+}
+
+double log10(double value)
+{
+    return log(value) / 2.30258509299404568402;
+}
+
+double log2(double value)
+{
+    return log(value) / 0.69314718055994530942;
+}
+
+double pow(double base, double exponent)
+{
+    /* integral exponents go through repeated multiplication, which keeps
+     * exact results such as pow(2,10) == 1024 */
+    if (exponent == floor(exponent) && fabs(exponent) <= 1024.0) {
+        long whole = (long)exponent;
+        double result = 1.0;
+        long step;
+
+        if (whole < 0) {
+            long inverse = -whole;
+
+            for (step = 0; step < inverse; ++step) {
+                result /= base;
+            }
+            return result;
+        }
+        for (step = 0; step < whole; ++step) {
+            result *= base;
+        }
+        return result;
+    }
+    if (base < 0.0) {
+        return 0.0 / 1.0;
+    }
+    if (base == 0.0) {
+        return exponent == 0.0 ? 1.0 : 0.0;
+    }
+    return exp(exponent * log(base));
+}
+
+double fmod(double value, double divisor)
+{
+    double quotient;
+
+    if (divisor == 0.0) {
+        return 0.0 / 1.0;
+    }
+    quotient = value / divisor;
+    quotient = quotient < 0.0 ? -floor(-quotient) : floor(quotient);
+    return value - quotient * divisor;
+}
+
+double ldexp(double value, int exponent)
+{
+    double result = value;
+
+    while (exponent > 0) {
+        result *= 2.0;
+        --exponent;
+    }
+    while (exponent < 0) {
+        result *= 0.5;
+        ++exponent;
+    }
+    return result;
+}
+
+double frexp(double value, int *out_exponent)
+{
+    int exponent = 0;
+    double mantissa = value;
+
+    if (mantissa == 0.0 || mantissa != mantissa) {
+        *out_exponent = 0;
+        return mantissa;
+    }
+    while (mantissa >= 1.0) {
+        mantissa *= 0.5;
+        ++exponent;
+    }
+    while (mantissa < 0.5) {
+        mantissa *= 2.0;
+        --exponent;
+    }
+    *out_exponent = exponent;
+    return mantissa;
+}
+
+double modf(double value, double *out_integral)
+{
+    double integral = value < 0.0 ? ceil(value) : floor(value);
+
+    *out_integral = integral;
+    return value - integral;
+}
+
+double sinh(double value)
+{
+    return (exp(value) - exp(-value)) * 0.5;
+}
+
+double cosh(double value)
+{
+    return (exp(value) + exp(-value)) * 0.5;
+}
+
+double tanh(double value)
+{
+    double e = exp(2.0 * value);
+
+    return (e - 1.0) / (e + 1.0);
+}
+
+/* --------------------------------------------------------------- time ---- */
+/* Wall clock is meaningless in a kernel, so time() reports monotonic
+ * milliseconds since boot.  Lua only uses it to seed math.random. */
+
+extern uint64_t pit_ticks(void);
+
+time_t time(time_t *out_value)
+{
+    uint64_t now = pit_ticks();
+
+    if (out_value != 0) {
+        *out_value = (time_t)(now / 1000U);
+    }
+    return (time_t)(now / 1000U);
+}
+
+double difftime(time_t end, time_t start)
+{
+    return (double)end - (double)start;
+}
+
+clock_t clock(void)
+{
+    return (clock_t)(pit_ticks() * 1000U / 1000000U);
 }
