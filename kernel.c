@@ -242,6 +242,33 @@ static void serial_post(const char *label, const char *status)
 
 static bool console_enabled;
 
+/* The verbose boot scrolls past far too quickly to read on a real display.
+ * Pausing after each line makes the POST legible without slowing the serial
+ * log, which is what a headless boot actually uses. */
+/* Deliberately not a macro: a compile time constant would let the compiler
+ * fold the wait away entirely, and a zero would not compare. */
+static uint32_t console_pause_ms = 150U;
+
+/* False until the PIT is running and interrupts are on.  Pausing before that
+ * point would wait on a tick counter that never advances, and halt with
+ * interrupts masked, which never wakes: the boot would simply stop. */
+static bool console_pause_ready;
+
+static void console_pause(void)
+{
+    uint64_t start;
+    uint64_t limit;
+
+    if (console_enabled == false || console_pause_ready == false) {
+        return;
+    }
+    start = pit_ticks();
+    limit = start + console_pause_ms;
+    while (pit_ticks() < limit) {
+        __asm__ volatile("hlt");
+    }
+}
+
 static uint32_t post_color(const char *status)
 {
     if (status[0] == 'O') {
@@ -259,6 +286,7 @@ static void post(const char *label, const char *status)
     if (console_enabled) {
         console_status(label, status, post_color(status));
         console_flush();
+        console_pause();
     }
 }
 
@@ -268,6 +296,7 @@ static void post_line(const char *text)
     if (console_enabled) {
         console_write(text);
         console_flush();
+        console_pause();
     }
 }
 
@@ -796,6 +825,7 @@ void kernel_main(uint64_t framebuffer_address, uint32_t pitch,
     pic_init();
     pic_unmask(0);
     __asm__ volatile("sti");
+    console_pause_ready = true;
     post("INTERRUPTS ENABLED", "OK");
 
     if (task_spawn(idle_task, 0) < 0) {

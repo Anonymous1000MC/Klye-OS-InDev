@@ -181,9 +181,11 @@ static const struct menu_def menus[MENU_TOTAL] = {
 #define CURSOR_DAMAGE_TOP_PAD 2
 #define CURSOR_DAMAGE_W 20
 #define CURSOR_DAMAGE_H 20
+/* A solid pointer.  The previous bitmap was an outline, which read as a
+ * transparent cursor over a light desktop. */
 static const uint16_t cursor_shape[16] = {
-    0x0001, 0x0003, 0x0005, 0x0009, 0x0011, 0x0021, 0x0041, 0x0081,
-    0x0101, 0x0201, 0x1F81, 0x0E41, 0x0B41, 0x1101, 0x1E01, 0x1C01
+    0x0001, 0x0003, 0x0007, 0x000F, 0x001F, 0x003F, 0x007F, 0x00FF,
+    0x01FF, 0x03FF, 0x07FF, 0x0FFF, 0x1FFF, 0x1E7F, 0x1C7F, 0x1C7F
 };
 
 static struct wm_state wm;
@@ -1384,51 +1386,30 @@ static void draw_cursor_overlay_region(struct gfx_surface *surface,
                                        const struct gfx_rect *r)
 {
     for (int row = 0; row < 16; ++row) {
-        uint16_t bits = cursor_shape[row];
-
         for (int column = 0; column < 16; ++column) {
-            struct gfx_rect pixel;
             int x = wm.mouse_x + column;
             int y = wm.mouse_y + row;
+            struct gfx_rect pixel;
 
-            if ((bits & (1U << column)) == 0U) {
+            if ((cursor_shape[row] & (1U << column)) == 0U) {
                 continue;
             }
             pixel.x = x;
             pixel.y = y;
             pixel.width = 1;
             pixel.height = 1;
-            if (!gfx_rect_overlaps(r, &pixel)) {
+            if (gfx_rect_overlaps(r, &pixel) == false) {
                 continue;
             }
-            gfx_fill(surface, x, y, 1, 1, THEME_CURSOR_EDGE);
-        }
-    }
-    for (int row = 1; row < 15; ++row) {
-        uint16_t bits = cursor_shape[row];
-
-        for (int column = 1; column < 15; ++column) {
-            struct gfx_rect pixel;
-            int x = wm.mouse_x + column;
-            int y = wm.mouse_y + row;
-
-            if ((bits & (1U << column)) == 0U) {
-                continue;
-            }
-            if ((cursor_shape[row - 1] & (1U << column)) != 0U) {
-                continue;
-            }
-            if ((cursor_shape[row + 1] & (1U << column)) != 0U) {
-                continue;
-            }
-            pixel.x = x;
-            pixel.y = y;
-            pixel.width = 1;
-            pixel.height = 1;
-            if (!gfx_rect_overlaps(r, &pixel)) {
-                continue;
-            }
+            /* solid black pointer, with a one pixel white edge so it stays
+             * visible over both the light desktop and the black boot screen */
             gfx_fill(surface, x, y, 1, 1, THEME_CURSOR_FILL);
+            if ((row > 0 && (cursor_shape[row - 1] & (1U << column)) == 0U) ||
+                (row < 15 && (cursor_shape[row + 1] & (1U << column)) == 0U) ||
+                (column > 0 && (cursor_shape[row] & (1U << (column - 1))) == 0U) ||
+                (column < 15 && (cursor_shape[row] & (1U << (column + 1))) == 0U)) {
+                gfx_fill(surface, x, y, 1, 1, THEME_CURSOR_EDGE);
+            }
         }
     }
 }
@@ -2672,53 +2653,33 @@ void wm_service(void)
 
 void wm_run_boot_animation(void)
 {
-    int radius = 44;
+    /* Deliberately plain: a black screen, the K, and a bar that fills.  The
+     * previous version had a gradient, a ring that swept, a light sweep and
+     * three lines of text, which was a lot of motion for something the eye
+     * only passes once on the way to the desktop. */
+    static const uint32_t black = 0xFF000000U;
+    static const uint32_t white = 0xFFFFFFFFU;
+    static const uint32_t track = 0xFF282828U;
+    int center_x = (int)gfx_width() / 2;
+    int center_y = (int)gfx_height() / 2;
+    int bar_width = 320;
+    int bar_height = 6;
+    int bar_x = center_x - bar_width / 2;
+    int bar_y = center_y + 120;
+
     for (int frame = 0; frame < BOOT_ANIMATION_FRAMES; ++frame) {
-        int progress = frame * 100 / BOOT_ANIMATION_FRAMES;
-        int sweep = progress * 3 - 100;
+        int progress = frame * 100 / (BOOT_ANIMATION_FRAMES - 1);
+
+        gfx_fill(wm.back, 0, 0, (int)gfx_width(), (int)gfx_height(), black);
+        font_draw_centered(wm.back, center_x, center_y + 20, "K", white, 8);
+
+        gfx_fill(wm.back, bar_x, bar_y, bar_width, bar_height, track);
+        gfx_fill(wm.back, bar_x, bar_y, bar_width * progress / 100, bar_height,
+                 white);
 
         gfx_damage_all();
-        gfx_blit(wm.back, 0, 0, (int)gfx_width(), (int)gfx_height(),
-                 wm.wallpaper, 0, 0);
-        gfx_blend_rect(wm.back, 0, 0, (int)gfx_width(), (int)gfx_height(),
-                       PIXEL_RGB(0x14, 0x18, 0x22), 214U);
-        {
-            int center_x = (int)gfx_width() / 2;
-            int center_y = (int)gfx_height() / 2;
-            int ring_radius = 26 + progress * 44 / 100;
-
-            for (int layer = 0; layer < 4; ++layer) {
-                int size = radius * 2 - layer * 14;
-                uint32_t color = layer == 0 ? THEME_ACCENT
-                                            : PIXEL_RGB(0x2A, 0x30, 0x44);
-
-                if (size > 0) {
-                    gfx_rounded_rect_alpha(wm.back, center_x - size / 2,
-                                           center_y - size / 2, size, size,
-                                           size / 2, color,
-                                           layer == 0 ? 255U : 120U);
-                }
-            }
-            font_draw_centered(wm.back, center_x, center_y + 84, "KLYE OS",
-                               THEME_TEXT_ON_DARK, 2);
-            font_draw_centered(wm.back, center_x, center_y + 104,
-                               "freestanding x86_64", THEME_TEXT_ON_DARK_DIM, 1);
-            gfx_rounded_rect_alpha(wm.back, center_x - 110, center_y + 128, 220,
-                                   5, 3, PIXEL_RGB(0x33, 0x3A, 0x4C), 255U);
-            gfx_fill(wm.back, center_x - 110,
-                     center_y + 128, 220 * progress / 100, 5, THEME_ACCENT);
-            gfx_ring(wm.back, center_x, center_y, ring_radius, 2,
-                     gfx_shade(THEME_ACCENT, -(progress * 70 / 100)));
-            font_draw_centered(wm.back, center_x, center_y + 156,
-                               "starting compositor", THEME_TEXT_ON_DARK_DIM, 1);
-            if (sweep > 0) {
-                gfx_blend_rect(wm.back, sweep * (int)gfx_width() / 100, 0,
-                               2, (int)gfx_height(), PIXEL_RGB(0xFF, 0xFF, 0xFF),
-                               18U);
-            }
-        }
-        draw_cursor_overlay(wm.back);
         gfx_present();
+
         animation_tick++;
         {
             uint64_t target = wm.last_frame_q16 + FRAME_INTERVAL_Q16;

@@ -14,6 +14,9 @@
 #define CONSOLE_COLS 92
 #define CONSOLE_ROWS 40
 #define CONSOLE_PAD 26
+#define CONSOLE_TTY_MARGIN_X 16
+#define CONSOLE_TTY_MARGIN_Y 20
+#define CONSOLE_TTY_BG PIXEL_RGB(0x00, 0x00, 0x00)
 
 struct console_cell {
     char glyph;
@@ -86,9 +89,10 @@ void console_init(void)
     console_colour[1] = CONSOLE_COLOR_OK;
     console_colour[2] = CONSOLE_COLOR_WARN;
     console_colour[3] = CONSOLE_COLOR_ACCENT;
-    console_origin_x = (int)(gfx_width() / 2U) - (CONSOLE_COLS * FONT_ADVANCE) / 2;
-    console_origin_y = (int)(gfx_height() / 2U) -
-                       (CONSOLE_ROWS * FONT_LINE_HEIGHT) / 2;
+    /* A verbose boot reads as a terminal, so the text starts at the top left
+     * and runs down rather than sitting in a centred panel. */
+    console_origin_x = CONSOLE_TTY_MARGIN_X;
+    console_origin_y = CONSOLE_TTY_MARGIN_Y;
     console_ready = true;
     console_clear();
     console_paint();
@@ -186,24 +190,12 @@ void console_paint(void)
 {
     struct gfx_surface *back = gfx_backbuffer();
     char glyph[2];
-    int panel_width = CONSOLE_COLS * FONT_ADVANCE + CONSOLE_PAD * 2;
-    int panel_height = CONSOLE_ROWS * FONT_LINE_HEIGHT + CONSOLE_PAD * 2;
 
     if (!console_ready) {
         return;
     }
-    gfx_gradient_v(back, 0, 0, (int)gfx_width(), (int)gfx_height(),
-                   THEME_WALLPAPER_TOP, THEME_WALLPAPER_BOTTOM);
-    gfx_rounded_shadow(back, console_origin_x - CONSOLE_PAD,
-                       console_origin_y - CONSOLE_PAD, panel_width,
-                       panel_height, 14, 26, 8, THEME_SHADOW_COLOR, 130U);
-    gfx_rounded_rect_alpha(back, console_origin_x - CONSOLE_PAD,
-                           console_origin_y - CONSOLE_PAD, panel_width,
-                           panel_height, 14, THEME_CONSOLE_BG, 244U);
-    gfx_rounded_border_alpha(back, console_origin_x - CONSOLE_PAD,
-                             console_origin_y - CONSOLE_PAD, panel_width,
-                             panel_height, 14, 1,
-                             PIXEL_RGB(0xFF, 0xFF, 0xFF), 60U);
+    /* flat black, the way a terminal looks before anything is on it */
+    gfx_fill(back, 0, 0, (int)gfx_width(), (int)gfx_height(), CONSOLE_TTY_BG);
     for (int row = 0; row < CONSOLE_ROWS; ++row) {
         for (int column = 0; column < CONSOLE_COLS; ++column) {
             const struct console_cell *cell = &console_grid[row][column];
