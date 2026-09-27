@@ -27,7 +27,7 @@ ROOTFS := rootfs
 TOOLS := $(BUILD_DIR)/tools
 VFS_IMAGE := $(BUILD_DIR)/vfs_image.c
 
-C_SOURCES := kernel.c scheduler.c mem.c heap.c libc.c gfx.c font.c input.c vfs.c launcher.c kby.c kas.c apps.c shell.c wm.c gui.c lua_host.c ata.c blob.c mmu.c
+C_SOURCES := kernel.c scheduler.c mem.c heap.c libc.c gfx.c font.c input.c vfs.c launcher.c kby.c kas.c apps.c shell.c wm.c gui.c lua_host.c ata.c blob.c mmu.c wad.c
 ASM_SOURCES := interrupts.S context.S fpu.S setjmp.S
 
 # Lua 5.4.7 core plus the base/string/table/math/utf8 libraries.  The io, os,

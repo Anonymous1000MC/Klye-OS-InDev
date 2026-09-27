@@ -4,6 +4,7 @@
 #include "apps.h"
 #include "ata.h"
 #include "blob.h"
+#include "wad.h"
 #include "vfs.h"
 #include "gfx.h"
 #include "input.h"
@@ -706,6 +707,96 @@ static void cmd_wadcheck(char **tokens, int count)
         terminal_write((const char *)buffer + length - 19U, 19);
         terminal_puts("\n");
     }
+    blob_release(buffer);
+}
+
+/* "wadinfo <file>" parses a WAD straight out of the disk image and reports
+ * what it found, so the directory walk can be checked against a real WAD
+ * without a debugger attached. */
+static void cmd_wadinfo(char **tokens, int count)
+{
+    const char *path = "doom/DOOM1.WAD";
+    void *buffer = 0;
+    uint32_t length = 0;
+    int levels = 0;
+
+    if (count > 1) {
+        path = tokens[1];
+    }
+    if (!blob_load(path, &buffer, &length)) {
+        terminal_puts("wadinfo: ");
+        terminal_puts(blob_error());
+        terminal_puts("\n");
+        terminal_error();
+        return;
+    }
+    if (!wad_open(buffer, length)) {
+        terminal_puts("wadinfo: ");
+        terminal_puts(wad_error());
+        terminal_puts("\n");
+        blob_release(buffer);
+        terminal_error();
+        return;
+    }
+    terminal_puts("wadinfo: ");
+    terminal_puts(wad_kind());
+    terminal_puts(", ");
+    terminal_printf_number((uint64_t)wad_count());
+    terminal_puts(" lumps, ");
+    terminal_printf_number((uint64_t)length);
+    terminal_puts(" bytes\n");
+
+    /* a few lumps the game cannot start without */
+    static const char *wanted[] = {"PLAYPAL", "COLORMAP", "PNAMES",
+                                    "TEXTURE1", "TEXTURE2", "TITLEPIC", 0};
+    for (int index = 0; wanted[index] != 0; ++index) {
+        const struct wad_lump *lump = wad_find(wanted[index]);
+
+        terminal_puts("  ");
+        terminal_puts(wanted[index]);
+        if (lump == 0) {
+            terminal_puts(": absent\n");
+            continue;
+        }
+        terminal_puts(": ");
+        terminal_printf_number((uint64_t)lump->size);
+        terminal_puts(" bytes");
+        if (!lump->loaded) {
+            terminal_puts(" (marker)");
+        }
+        terminal_puts("\n");
+    }
+
+    for (int index = 0; index < wad_count(); ++index) {
+        const struct wad_lump *lump = wad_at(index);
+        const struct wad_lump *thngs = 0;
+        const struct wad_lump *linedef = 0;
+        const struct wad_lump *sidedef = 0;
+
+        if (!wad_is_level_marker(lump)) {
+            continue;
+        }
+        ++levels;
+        if (levels > 12) {
+            continue;
+        }
+        terminal_puts("  level ");
+        terminal_puts(lump->name);
+        if (wad_level_parts(lump, &thngs, &linedef, &sidedef)) {
+            terminal_puts(": things ");
+            terminal_printf_number((uint64_t)thngs->size);
+            terminal_puts(" linedefs ");
+            terminal_printf_number((uint64_t)linedef->size);
+            terminal_puts(" sidedefs ");
+            terminal_printf_number((uint64_t)sidedef->size);
+        } else {
+            terminal_puts(": no data lumps");
+        }
+        terminal_puts("\n");
+    }
+    terminal_puts("  levels found: ");
+    terminal_printf_number((uint64_t)levels);
+    terminal_puts("\n");
     blob_release(buffer);
 }
 
@@ -2222,6 +2313,8 @@ void shell_execute(const char *line)
         cmd_help();
     } else if (text_equal(tokens[0], "wadcheck")) {
         cmd_wadcheck(tokens, count);
+    } else if (text_equal(tokens[0], "wadinfo")) {
+        cmd_wadinfo(tokens, count);
     } else if (text_equal(tokens[0], "files")) {
         cmd_files();
     } else if (text_equal(tokens[0], "ata")) {

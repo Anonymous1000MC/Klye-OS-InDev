@@ -34,6 +34,12 @@ QMAP = {
     '\n': 'ret', ':': 'shift_semicolon',
 }
 
+# QEMU qcodes are lower case for letters, so an upper case character has to be
+# mapped down explicitly.  Without this, typing a path with a capital in it
+# fails with "Parameter 'data' does not accept value 'D'".
+for _letter in range(ord('A'), ord('Z') + 1):
+    QMAP[chr(_letter)] = chr(_letter + 32)
+
 
 class Qmp:
     def __init__(self, path):
