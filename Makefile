@@ -92,8 +92,13 @@ KBY_BINARIES := $(KBY_SOURCES:.kby=.kbin) $(KBY_BIN_PROGRAMS)
 # source copied next to the record where the entry name can find it.
 LUA_BIN_SCRIPTS := $(patsubst %,$(ROOTFS)/bin/%,$(shell $(call launcher_entries,lua)))
 
-$(ROOTFS)/bin/%.lua: $(ROOTFS)/home/klye/lua/%.lua
-	cp $< $@
+# Only emit a staging rule for launchers whose source actually lives in
+# home/klye/lua.  A script dropped straight into /bin, or kept somewhere else,
+# would otherwise make make fail looking for a prerequisite that is not there.
+LUA_STAGE_SRC := $(foreach f,$(patsubst $(ROOTFS)/bin/%,%,$(LUA_BIN_SCRIPTS)),\
+                   $(wildcard $(ROOTFS)/home/klye/lua/$(f)))
+$(foreach src,$(LUA_STAGE_SRC),\
+  $(eval $(ROOTFS)/bin/$(notdir $(src)): $(src) ; $$(cp $$< $$@)))
 
 $(VFS_IMAGE): $(BUILD_DIR)/mkvfs $(KBY_BINARIES) $(LUA_BIN_SCRIPTS) \
              $(shell find $(ROOTFS) -type f ! -name '*.kby' 2>/dev/null)

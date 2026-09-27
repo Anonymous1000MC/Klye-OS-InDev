@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include "kernel.h"
+#include "heap.h"
 #include "vfs.h"
 
 struct vfs_node {
@@ -408,8 +409,15 @@ static bool vfs_load_image(void)
     uint32_t total = vfs_image_bytes;
     uint32_t count = vfs_image_count;
     uint32_t index;
+    uint32_t skipped = 0;
+    /* Scratch for file bodies.  This used to be a 4 KiB stack buffer, which
+     * meant any file larger than that aborted the entire mount: one oversized
+     * file left the filesystem half built with no indication why. */
+    char *scratch = (char *)(uintptr_t)heap_malloc(
+        (size_t)VFS_MAX_BLOCKS_PER_FILE * VFS_BLOCK_SIZE);
 
     if (vfs_image_magic != VFS_IMAGE_MAGIC) {
+        heap_free(scratch);
         return false;
     }
     for (index = 0; index < count; ++index) {
@@ -419,6 +427,7 @@ static bool vfs_load_image(void)
         char path[VFS_PATH_MAX];
 
         if ((uint32_t)(vfs_image_data + total - cursor) < 8U) {
+            heap_free(scratch);
             return false;
         }
         path_len = (uint32_t)cursor[0] | ((uint32_t)cursor[1] << 8);
@@ -426,9 +435,11 @@ static bool vfs_load_image(void)
         kind = cursor[4];
         cursor += 8;
         if ((uint32_t)(vfs_image_data + total - cursor) < path_len + body_len) {
+            heap_free(scratch);
             return false;
         }
         if (path_len == 0U || path_len >= sizeof(path)) {
+            heap_free(scratch);
             return false;
         }
         __builtin_memcpy(path, cursor, (size_t)path_len);
@@ -442,23 +453,29 @@ static bool vfs_load_image(void)
             if (vfs_create(path, true) < 0) {
                 return false;
             }
+        } else if (body_len >
+                   (uint32_t)VFS_MAX_BLOCKS_PER_FILE * VFS_BLOCK_SIZE ||
+                   scratch == 0) {
+            /* one file the filesystem cannot hold must not cost us the whole
+             * mount, so drop it and keep going */
+            ++skipped;
         } else {
             int node = vfs_create(path, false);
 
             if (node < 0) {
-                return false;
-            }
-            if (body_len != 0U) {
-                char body[VFS_BODY_MAX];
-
-                if (body_len > sizeof(body)) {
-                    return false;
+                ++skipped;
+            } else if (body_len != 0U) {
+                __builtin_memcpy(scratch, cursor, (size_t)body_len);
+                if (vfs_write(path, scratch, body_len) < 0) {
+                    ++skipped;
                 }
-                __builtin_memcpy(body, cursor, (size_t)body_len);
-                (void)vfs_write(path, body, body_len);
             }
         }
         cursor += body_len;
+    }
+    heap_free(scratch);
+    if (skipped != 0U) {
+        serial_write("vfs: skipped a file that does not fit\n");
     }
     return true;
 }
