@@ -761,11 +761,38 @@ void kernel_main(uint64_t framebuffer_address, uint32_t pitch,
 
     serial_init();
     fpu_enable();
-    post_line("Klye OS 0.2\n");
+
+    /* The framebuffer has to exist before the first line is written.  The
+     * console paints into the back buffer, so initialising it later meant
+     * every early status line was drawn into a surface with no pixels: the
+     * screen stayed black, the text piled up in the console grid, and the
+     * entire boot log then appeared at once the moment the framebuffer was
+     * finally brought up. */
+    if (video && gui_init(framebuffer_address, pitch, width, height, bpp,
+                          framebuffer_type) == false) {
+        video = false;
+    }
     console_enabled = video;
     if (video) {
         console_init();
     }
+    post_line("Klye OS 0.2\n");
+
+    /* The verbose boot paces itself with the PIT, so the timer has to be
+     * running before the first status line.  It used to be brought up after
+     * the CPU and memory report, which meant the first dozen lines all
+     * appeared at once. */
+    gdt_init();
+    idt_init();
+    pit_init(1000);
+    pic_init();
+    pic_unmask(0);
+    __asm__ volatile("sti");
+    console_pause_ready = true;
+
+    post("GLOBAL DESCRIPTOR TABLE", "OK");
+    post("INTERRUPT DESCRIPTOR TABLE", "OK");
+    post("SSE / FLOATING POINT", "OK");
     report_cpu();
 
     memory_bytes = map_tag_total();
@@ -799,12 +826,6 @@ void kernel_main(uint64_t framebuffer_address, uint32_t pitch,
         }
     }
 
-    gdt_init();
-    post("GLOBAL DESCRIPTOR TABLE", "OK");
-    idt_init();
-    post("INTERRUPT DESCRIPTOR TABLE", "OK");
-    post("SSE / FLOATING POINT", "OK");
-
     scheduler_init(boot_stack);
     post("TASK SCHEDULER", "OK");
 
@@ -819,13 +840,8 @@ void kernel_main(uint64_t framebuffer_address, uint32_t pitch,
     launcher_scan();
     post_number("  launchers in /bin: ", (uint32_t)launcher_count(), "\n");
 
-    pit_init(1000);
     post("PROGRAMMABLE INTERVAL TIMER", "OK");
     post_line("       channel 0 at 1000 Hz, 1 ms tick\n");
-    pic_init();
-    pic_unmask(0);
-    __asm__ volatile("sti");
-    console_pause_ready = true;
     post("INTERRUPTS ENABLED", "OK");
 
     if (task_spawn(idle_task, 0) < 0) {
@@ -865,16 +881,13 @@ void kernel_main(uint64_t framebuffer_address, uint32_t pitch,
     post("KLYE SHELL", "OK");
     post_number("  ", (uint32_t)APP_COUNT, " registered applications\n");
 
-    if (gui_init(framebuffer_address, pitch, width, height, bpp,
-                 framebuffer_type) == false) {
+    if (video == false) {
         post("KERNEL MODE", "MISSING");
     }
 
     post_line("Klye OS ready\n");
 
     wm_init();
-    wm_run_boot_animation();
-    wm_set_ready(true);
     post("BOOT ANIMATION", "OK");
     post_line("       klye os splash, then desktop\n");
 
@@ -883,6 +896,13 @@ void kernel_main(uint64_t framebuffer_address, uint32_t pitch,
     }
     post("COMPOSITOR TASK", "OK");
     post_line("       60 fps frame loop, damage rectangles\n");
+
+    /* Deliberately last: every post() above repaints the console, so running
+     * the animation before them made the whole boot log flash up again on top
+     * of it.  The compositor task is already spawned but does nothing while
+     * wm.ready is still false, so the animation is not overdrawn here. */
+    wm_run_boot_animation();
+    wm_set_ready(true);
 
     for (;;) {
         __asm__ volatile("hlt");
