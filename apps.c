@@ -258,38 +258,51 @@ void terminal_clear(void)
     terminal_begin_prompt();
 }
 
+/* One character through the terminal, with the control characters handled the
+ * way a tty would.  Shared by the string and counted forms. */
+static void terminal_putc_raw(char character)
+{
+    if (character == '\n') {
+        terminal_new_line(TERMINAL_FLAG_OUTPUT);
+        return;
+    }
+    if (character == '\r') {
+        return;
+    }
+    if (character == '\b') {
+        if (term_cursor_column > 0) {
+            term_cursor_column--;
+            term_lengths[term_cursor_line] = (uint8_t)term_cursor_column;
+            term_lines[term_cursor_line][term_cursor_column] = '\0';
+        }
+        return;
+    }
+    if (character < ' ' || character > '~') {
+        return;
+    }
+    if (term_cursor_column >= TERMINAL_LOGICAL_COLS) {
+        terminal_new_line(TERMINAL_FLAG_OUTPUT);
+    }
+    term_lines[term_cursor_line][term_cursor_column] = character;
+    term_cursor_column++;
+    term_lengths[term_cursor_line] = (uint8_t)term_cursor_column;
+    term_lines[term_cursor_line][term_cursor_column] = '\0';
+    term_flags[term_cursor_line] |= TERMINAL_FLAG_OUTPUT;
+}
+
+void terminal_write(const char *text, int length)
+{
+    /* for text that is not NUL terminated, such as a slice out of a file */
+    for (int index = 0; index < length; ++index) {
+        terminal_putc_raw(text[index]);
+    }
+    term_scroll_offset = 0;
+}
+
 void terminal_puts(const char *text)
 {
     for (int index = 0; text[index] != '\0'; ++index) {
-        char character = text[index];
-
-        if (character == '\n') {
-            terminal_new_line(TERMINAL_FLAG_OUTPUT);
-            continue;
-        }
-        if (character == '\r') {
-            continue;
-        }
-        if (character == '\b') {
-            if (term_cursor_column > 0) {
-                term_cursor_column--;
-                term_lengths[term_cursor_line] =
-                    (uint8_t)term_cursor_column;
-                term_lines[term_cursor_line][term_cursor_column] = '\0';
-            }
-            continue;
-        }
-        if (character < ' ' || character > '~') {
-            continue;
-        }
-        if (term_cursor_column >= TERMINAL_LOGICAL_COLS) {
-            terminal_new_line(TERMINAL_FLAG_OUTPUT);
-        }
-        term_lines[term_cursor_line][term_cursor_column] = character;
-        term_cursor_column++;
-        term_lengths[term_cursor_line] = (uint8_t)term_cursor_column;
-        term_lines[term_cursor_line][term_cursor_column] = '\0';
-        term_flags[term_cursor_line] |= TERMINAL_FLAG_OUTPUT;
+        terminal_putc_raw(text[index]);
     }
     term_scroll_offset = 0;
 }

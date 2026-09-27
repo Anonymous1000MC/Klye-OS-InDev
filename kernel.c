@@ -15,6 +15,7 @@
 #include "theme.h"
 #include "wm.h"
 #include "ata.h"
+#include "blob.h"
 #include "vfs.h"
 
 struct __attribute__((packed)) gdt_descriptor {
@@ -808,6 +809,15 @@ void kernel_main(uint64_t framebuffer_address, uint32_t pitch,
     } else {
         serial_write("ata: none (");
         serial_write(ata_error());
+        serial_write(")\n");
+    }
+    if (blob_mount()) {
+        serial_write("blob: ");
+        serial_write_decimal(blob_count());
+        serial_write(" file(s) on the image\n");
+    } else {
+        serial_write("blob: no image (");
+        serial_write(blob_error());
         serial_write(")\n");
     }
 

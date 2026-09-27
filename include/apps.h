@@ -50,6 +50,7 @@ void app_draw_icon(struct gfx_surface *surface, enum app_id app, int x, int y,
 
 void terminal_reset(void);
 void terminal_puts(const char *text);
+void terminal_write(const char *text, int length);
 void terminal_error(void);
 void terminal_printf_number(uint64_t value);
 void terminal_clear(void);

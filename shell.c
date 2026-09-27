@@ -3,6 +3,7 @@
 
 #include "apps.h"
 #include "ata.h"
+#include "blob.h"
 #include "vfs.h"
 #include "gfx.h"
 #include "input.h"
@@ -664,6 +665,71 @@ static void cmd_df(void)
  * free() actually returning memory. */
 /* "ata" reports what the drive says, and "ataread <lba>" pulls one sector
  * back so the transfer path can be checked against a known pattern. */
+/* "files" lists the disk image, and "blobread <name>" pulls a file off the
+ * disk and back onto the built-in filesystem, so a large file such as a WAD
+ * can be checked against the host copy. */
+/* "wadcheck" pulls a named file off the disk and hashes it, so a large
+ * transfer can be confirmed end to end without a debugger attached. */
+static void cmd_wadcheck(char **tokens, int count)
+{
+    const char *path = "doom/probe.wad";
+    void *buffer = 0;
+    uint32_t length = 0;
+    uint32_t hash = 2166136261U;
+
+    if (count > 1) {
+        path = tokens[1];
+    }
+    if (!blob_load(path, &buffer, &length)) {
+        terminal_puts("wadcheck: ");
+        terminal_puts(blob_error());
+        terminal_puts("\n");
+        terminal_error();
+        return;
+    }
+    for (uint32_t index = 0; index < length; ++index) {
+        hash ^= (uint32_t)((const uint8_t *)buffer)[index];
+        hash *= 16777619U;
+    }
+    terminal_puts("wadcheck: ");
+    terminal_puts(path);
+    terminal_puts(" loaded ");
+    terminal_printf_number((uint64_t)length);
+    terminal_puts(" bytes, fnv1a ");
+    terminal_printf_number((uint64_t)hash);
+    terminal_puts("\n");
+    /* show the markers that were planted at known offsets */
+    if (length > 6U * 1024U * 1024U) {
+        terminal_puts("  at 6MiB: ");
+        terminal_write((const char *)buffer + 6U * 1024U * 1024U, 17);
+        terminal_puts("\n  at end:  ");
+        terminal_write((const char *)buffer + length - 19U, 19);
+        terminal_puts("\n");
+    }
+    blob_release(buffer);
+}
+
+static void cmd_files(void)
+{
+    if (!blob_ready()) {
+        terminal_puts("files: no image mounted; ");
+        terminal_puts(blob_error());
+        terminal_puts("\n");
+        terminal_error();
+        return;
+    }
+    terminal_puts("files: ");
+    terminal_printf_number((uint64_t)blob_count());
+    terminal_puts(" entries\n");
+    for (uint32_t index = 0; index < blob_count(); ++index) {
+        terminal_puts("  ");
+        terminal_puts(blob_name(index));
+        terminal_puts("  ");
+        terminal_printf_number((uint64_t)blob_size(blob_name(index)));
+        terminal_puts(" bytes\n");
+    }
+}
+
 static void cmd_ata(void)
 {
     if (!ata_present()) {
@@ -2154,6 +2220,10 @@ void shell_execute(const char *line)
 
     if (text_equal(tokens[0], "help") || text_equal(tokens[0], "?")) {
         cmd_help();
+    } else if (text_equal(tokens[0], "wadcheck")) {
+        cmd_wadcheck(tokens, count);
+    } else if (text_equal(tokens[0], "files")) {
+        cmd_files();
     } else if (text_equal(tokens[0], "ata")) {
         cmd_ata();
     } else if (text_equal(tokens[0], "ataread")) {
