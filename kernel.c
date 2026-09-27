@@ -16,6 +16,7 @@
 #include "wm.h"
 #include "ata.h"
 #include "blob.h"
+#include "mmu.h"
 #include "vfs.h"
 
 struct __attribute__((packed)) gdt_descriptor {
@@ -810,6 +811,15 @@ void kernel_main(uint64_t framebuffer_address, uint32_t pitch,
         serial_write("ata: none (");
         serial_write(ata_error());
         serial_write(")\n");
+    }
+    /* Set up the mapping window before anything tries to load a large file,
+     * since the boot-time work below will want mapped pages. */
+    if (vm_init()) {
+        serial_write("mmu: mapping window ready\n");
+    } else {
+        serial_write("mmu: ");
+        serial_write(vm_error());
+        serial_write("\n");
     }
     if (blob_mount()) {
         serial_write("blob: ");

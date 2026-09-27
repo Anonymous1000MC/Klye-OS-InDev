@@ -334,6 +334,39 @@ void *heap_alloc_pages(size_t bytes)
     return take_run((uint32_t)((bytes + PAGE_BYTES - 1U) / PAGE_BYTES), 0);
 }
 
+/* A single frame, for callers that are going to map it somewhere themselves
+ * rather than use it at its physical address.  This deliberately goes through
+ * the same bitmap as heap_alloc_pages: malloc sub-allocates out of runs the
+ * bitmap has already handed over, so handing out one frame at a time from the
+ * same bitmap cannot collide with a block malloc believes it owns.
+ *
+ * It scans for itself rather than calling take_run(), because take_run also
+ * absorbs up to HEAP_RUN_ABSORB_MAX trailing free pages to smooth over later
+ * requests.  That is right for a large run and ruinous here: asking for 3072
+ * single frames for a 12 MiB mapping consumed about 200,000 frames, and the
+ * allocation failed with 126,000 still free.  One frame means one frame. */
+void *heap_alloc_frame(void)
+{
+    if (page_bitmap == 0) {
+        return 0;
+    }
+    for (uint32_t scanned = 0; scanned < page_total; ++scanned) {
+        uint32_t index = (page_cursor + scanned) % page_total;
+
+        if (bit_test(index)) {
+            bit_clear(index);
+            page_cursor = (index + 1U) % page_total;
+            return pool_base + (size_t)index * PAGE_BYTES;
+        }
+    }
+    return 0;
+}
+
+void heap_free_frame(void *address)
+{
+    heap_free_pages(address, PAGE_BYTES);
+}
+
 void heap_free_pages(void *address, size_t bytes)
 {
     uint32_t wanted;

@@ -25,6 +25,11 @@ void heap_init(const void *map_base, uint32_t map_length,
 void *heap_alloc_pages(size_t bytes);
 void heap_free_pages(void *address, size_t bytes);
 
+/* One 4 KiB frame at a time, for the page-table code that needs a physical
+ * page to map somewhere. */
+void *heap_alloc_frame(void);
+void heap_free_frame(void *address);
+
 /* malloc family.  heap_free() returns memory to the free list, which is what
  * Lua's collector needs: a bump allocator would leak an arena per cycle. */
 void *heap_malloc(size_t bytes);

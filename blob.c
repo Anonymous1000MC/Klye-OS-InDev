@@ -5,6 +5,7 @@
 #include "ata.h"
 #include "heap.h"
 #include "io.h"
+#include "mmu.h"
 
 #define BLOB_SECTOR        512U
 /* the magic is read little-endian, so the constants are the bytes of
@@ -16,6 +17,11 @@
 #define BLOB_NAME_MAX      32U
 #define BLOB_MAX_ENTRIES   4096U
 #define BLOB_ENTRIES_PER_SECTOR (BLOB_SECTOR / BLOB_ENTRY_SIZE)
+
+/* Below this a plain heap allocation is fine and cheaper.  Above it the
+ * contiguous allocator usually cannot satisfy the request, so the pages get
+ * mapped instead. */
+#define BLOB_MAPPED_THRESHOLD (512U * 1024U)
 
 struct blob_entry {
     char name[BLOB_NAME_MAX];
@@ -29,6 +35,17 @@ static struct blob_entry blob_entries[BLOB_MAX_ENTRIES];
 static uint32_t blob_entry_count;
 static bool blob_mounted;
 static char blob_error_text[72] = "";
+
+/* Which allocator a loaded buffer came from, so blob_release can hand it back
+ * the right way.  A small fixed table is enough: the game code holds one or
+ * two WAD-sized buffers for its whole run. */
+#define BLOB_TRACKED_MAX 8U
+struct blob_tracked {
+    void *pointer;
+    uint32_t length;
+    bool mapped;
+};
+static struct blob_tracked blob_tracked[BLOB_TRACKED_MAX];
 
 static void blob_fail(const char *why)
 {
@@ -218,6 +235,7 @@ bool blob_load(const char *path, void **out, uint32_t *length)
 {
     const struct blob_entry *entry;
     void *buffer;
+    bool mapped = false;
 
     blob_error_text[0] = 0;
     entry = blob_find(path);
@@ -225,14 +243,39 @@ bool blob_load(const char *path, void **out, uint32_t *length)
         blob_fail("no such file in the image");
         return false;
     }
-    buffer = heap_malloc(entry->length != 0U ? entry->length : 1U);
-    if (buffer == 0) {
-        blob_fail("out of memory loading the file");
-        return false;
+    /* A file past what the contiguous allocator can satisfy gets mapped
+     * pages instead: virtually contiguous, physically scattered.  The RAM heap
+     * still handles the small files, where it is cheaper and the address is a
+     * plain pointer with nothing behind it. */
+    if (entry->length > BLOB_MAPPED_THRESHOLD) {
+        buffer = vm_alloc_pages(entry->length != 0U ? entry->length : 1U);
+        mapped = buffer != 0;
+        if (buffer == 0) {
+            blob_fail(vm_error());
+            return false;
+        }
+    } else {
+        buffer = heap_malloc(entry->length != 0U ? entry->length : 1U);
+        if (buffer == 0) {
+            blob_fail("out of memory loading the file");
+            return false;
+        }
     }
     if (!blob_pread(path, 0U, buffer, entry->length)) {
-        heap_free(buffer);
+        if (mapped) {
+            vm_free_pages(buffer, entry->length);
+        } else {
+            heap_free(buffer);
+        }
         return false;
+    }
+    for (uint32_t index = 0; index < BLOB_TRACKED_MAX; ++index) {
+        if (blob_tracked[index].pointer == 0) {
+            blob_tracked[index].pointer = buffer;
+            blob_tracked[index].length = entry->length;
+            blob_tracked[index].mapped = mapped;
+            break;
+        }
     }
     *out = buffer;
     if (length != 0) {
@@ -243,6 +286,21 @@ bool blob_load(const char *path, void **out, uint32_t *length)
 
 void blob_release(void *pointer)
 {
+    /* vm_free_pages unmaps and reclaims frames; heap_free returns the block to
+     * the malloc free list.  Which one applies is not knowable from the
+     * pointer alone, so blob_load records the choice in a small table and this
+     * consults it. */
+    for (uint32_t index = 0; index < BLOB_TRACKED_MAX; ++index) {
+        if (blob_tracked[index].pointer == pointer) {
+            if (blob_tracked[index].mapped) {
+                vm_free_pages(pointer, blob_tracked[index].length);
+            } else {
+                heap_free(pointer);
+            }
+            blob_tracked[index].pointer = 0;
+            return;
+        }
+    }
     heap_free(pointer);
 }
 

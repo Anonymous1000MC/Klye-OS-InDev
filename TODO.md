@@ -15,7 +15,11 @@ Ordered so each blocker sits above whatever depends on it.
 - [ ] Restore a bounded per-frame KBY budget (~20k-50k)
 - [x] Bound the per-frame KBY budget and report a starved program
 - [ ] Dirty-rectangle tracking and a row blitter for a stable 60 FPS
-- [ ] ATA driver and disk-backed VFS, so installed apps survive a reboot
+- [x] ATA PIO driver on the legacy IDE ports
+- [x] Disk image format and whole-file loads for large files
+- [x] Dynamic page mapping, so large buffers need not be contiguous
+- [ ] WAD directory parsing and lump access
+- [ ] A real filesystem on the block layer, so installed apps survive a reboot
 - [ ] Larger VFS capacity: more nodes, more blocks, and much bigger files
 - [ ] Full PMM: dynamic page mapping, guard pages, demand paging
 - [ ] Userspace and ring 3, so Lua apps stop running in ring 0
@@ -28,12 +32,18 @@ Ordered so each blocker sits above whatever depends on it.
 
 ## Known limits and gaps
 
-- No persistent storage. RAM VFS only, so `kpm install` disappears on reboot.
+- Persistent storage is a work in progress. There is now an ATA driver, a
+  flat disk image format (tools/mkdisk.py), and whole-file loads that work for
+  multi-megabyte files. What is still missing is a real filesystem, so the RAM
+  VFS is still where the shell and editor keep their files and `kpm install`
+  still does not survive a reboot.
 - Lua apps run in ring 0. Errors are caught, but there is no memory isolation.
 - VFS holds ~128 nodes, 320 x 512-byte blocks, ~12 KiB max file size.
   A 4 MB DOOM WAD does not fit.
-- The frame heap is PMM-lite: contiguous frames plus a free-list malloc.
-  No dynamic page mapping, no DMA-capable physical ranges.
+- The frame heap is a bitmap plus a free-list malloc, and now supports
+  dynamically mapped pages (mmu.c) so a large buffer can be virtually
+  contiguous while physically scattered. Still missing: DMA-capable physical
+  ranges, guard pages, demand paging, and page eviction.
 - No PCI, DMA, or VIRTIO stack, which is what blocks accelerated 3D.
 - Float formatting matches glibc for ordinary magnitudes, but not always at
   the edges. `tests/fmt_diff.c` compares 1440 cases against glibc; 63 disagree
