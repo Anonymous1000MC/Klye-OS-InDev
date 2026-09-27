@@ -43,11 +43,17 @@ struct menu_def {
     uint32_t item_count;
 };
 
+#define WM_TITLE_MAX 48
+
 struct wm_window {
     int used;
     int app;
     int script;
     int lua;
+    /* Lua hosts have no enum app_id, so the title comes from their launcher
+     * record.  Native and bytecode windows leave this empty and fall back to
+     * the app or program name. */
+    char title[WM_TITLE_MAX];
     int x;
     int y;
     int width;
@@ -1274,9 +1280,11 @@ static void draw_window(struct gfx_surface *surface, struct wm_window *window)
         }
     }
     {
-        const char *label = window->script >= 0
-                                ? kby_app_title(kby_app_at(window->script))
-                                : app_title((enum app_id)window->app);
+        const char *label = window->title[0] != 0
+                                ? window->title
+                                : (window->script >= 0
+                                       ? kby_app_title(kby_app_at(window->script))
+                                       : app_title((enum app_id)window->app));
 
         font_draw(surface, window->x + 74, traffic_y + 3, label,
                   active ? THEME_TEXT_PRIMARY : THEME_TEXT_SECONDARY, 1);
@@ -1665,6 +1673,10 @@ void wm_launch_lua(int host_index, const char *title, int width, int height)
     if (height > (int)gfx_height() - 160) {
         height = (int)gfx_height() - 160;
     }
+    /* Wipe the slot the moment it is claimed.  Doing this after the position
+     * is computed erased it, which parked every new window at 0,0 underneath
+     * the menubar where its title bar could not be grabbed. */
+    __builtin_memset(&wm.windows[slot], 0, sizeof(wm.windows[slot]));
     {
         int offset = wm.window_count * 26;
 
@@ -1672,13 +1684,24 @@ void wm_launch_lua(int host_index, const char *title, int width, int height)
             offset = 150;
         }
         wm.windows[slot].x = 150 + offset;
-        wm.windows[slot].y = desktop_top() + 40 + offset;
+        /* Start well clear of the menubar: a window whose title bar sits
+         * against it is awkward to grab, because the bar is the only part
+         * you can drag. */
+        wm.windows[slot].y = desktop_top() + 72 + offset;
     }
-    __builtin_memset(&wm.windows[slot], 0, sizeof(wm.windows[slot]));
     wm.windows[slot].used = 1;
     wm.windows[slot].app = APP_ABOUT;
     wm.windows[slot].script = -1;
     wm.windows[slot].lua = host_index;
+    if (title != 0) {
+        int at = 0;
+
+        while (title[at] != 0 && at < WM_TITLE_MAX - 1) {
+            wm.windows[slot].title[at] = title[at];
+            ++at;
+        }
+        wm.windows[slot].title[at] = 0;
+    }
     wm.windows[slot].width = width;
     wm.windows[slot].height = height;
     wm.windows[slot].restore_x = wm.windows[slot].x;
@@ -1720,6 +1743,10 @@ void wm_launch_script(int script_index, const char *title, int width,
     if (height > (int)gfx_height() - 160) {
         height = (int)gfx_height() - 160;
     }
+    /* wipe the slot the moment it is claimed, before the position is written:
+     * doing it afterwards erased the position and parked the window at 0,0
+     * under the menubar, where its title bar cannot be grabbed */
+    __builtin_memset(&wm.windows[slot], 0, sizeof(wm.windows[slot]));
     {
         int offset = wm.window_count * 26;
 
@@ -1729,9 +1756,6 @@ void wm_launch_script(int script_index, const char *title, int width,
         wm.windows[slot].x = 120 + offset;
         wm.windows[slot].y = desktop_top() + 34 + offset;
     }
-    /* wipe the whole slot: a recycled window otherwise keeps the previous
-     * occupant's script or lua index and the window claims to be both */
-    __builtin_memset(&wm.windows[slot], 0, sizeof(wm.windows[slot]));
     wm.windows[slot].used = 1;
     wm.windows[slot].app = 0;
     wm.windows[slot].script = script_index;
@@ -1816,6 +1840,8 @@ void wm_launch_app(enum app_id app)
     if (height > (int)gfx_height() - 160) {
         height = (int)gfx_height() - 160;
     }
+    /* wipe the slot when it is claimed, before anything is written into it */
+    __builtin_memset(&wm.windows[slot], 0, sizeof(wm.windows[slot]));
     {
         int offset = wm.window_count * 26;
 
@@ -1825,7 +1851,6 @@ void wm_launch_app(enum app_id app)
         wm.windows[slot].x = 120 + offset;
         wm.windows[slot].y = desktop_top() + 34 + offset;
     }
-    __builtin_memset(&wm.windows[slot], 0, sizeof(wm.windows[slot]));
     wm.windows[slot].used = 1;
     wm.windows[slot].app = app;
     wm.windows[slot].script = -1;
@@ -2357,8 +2382,10 @@ static void process_mouse(const struct mouse_event *event)
 
         window->x = wm.mouse_x - window->drag_offset_x;
         window->y = wm.mouse_y - window->drag_offset_y;
-        if (window->y < menubar_height()) {
-            window->y = menubar_height();
+        /* Leave a few pixels of menubar visible so the title bar is never
+         * flush against it, which makes it hard to grab. */
+        if (window->y < menubar_height() + 4) {
+            window->y = menubar_height() + 4;
         }
         if (window->x > (int)gfx_width() - 60) {
             window->x = (int)gfx_width() - 60;
