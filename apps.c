@@ -185,21 +185,17 @@ void app_draw_icon(struct gfx_surface *surface, enum app_id app, int x, int y,
                    int size)
 {
     uint32_t accent = app_accent(app);
-    uint32_t top = gfx_shade(accent, 26);
-    uint32_t bottom = gfx_shade(accent, -34);
     int radius = size / 4;
-    int inset = size / 12;
 
     if (size < 8) {
         return;
     }
-    gfx_rounded_shadow(surface, x, y, size, size, radius, size / 3, 5,
-                       THEME_SHADOW_COLOR, 96U);
-    gfx_rounded_rect(surface, x, y, size, size, radius, bottom);
-    gfx_gradient_v(surface, x + inset, y + inset, size - inset * 2,
-                   (size - inset * 2) / 2 + 1, top, accent);
-    gfx_rounded_rect_alpha(surface, x + 1, y + 1, size - 2, size / 2, radius,
-                           PIXEL_RGB(0xFF, 0xFF, 0xFF), 46U);
+    /* Flat tile, no drop shadow and no gloss.  The shadow smeared a black
+     * halo around every icon and, because the desktop icons fade in, it
+     * appeared as a black stain that slowly turned transparent.  The white
+     * gloss sat in the middle of the tile as a blob over the symbol.  Both
+     * were left over from the old skeuomorphic look. */
+    gfx_rounded_rect(surface, x, y, size, size, radius, accent);
     font_draw_centered(surface, x + size / 2, y + size / 2 + 3,
                        app_symbols[app], THEME_TEXT_ON_DARK, size >= 40 ? 2 : 1);
 }
