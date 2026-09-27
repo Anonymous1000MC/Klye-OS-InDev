@@ -14,6 +14,8 @@
 #include <stdint.h>
 #include <time.h>
 
+#include "heap.h"
+
 /* ---------------------------------------------------------------- size ---- */
 
 size_t strlen(const char *text)
@@ -756,36 +758,79 @@ int vsnprintf(char *buffer, size_t size, const char *format, va_list arguments)
             } else if (use_exponent) {
                 uint64_t lead = (uint64_t)normalised;
                 double fraction = normalised - (double)lead;
+                uint8_t digits[48];
 
-                sink_number(&inner, lead, 10, false, 0, -1, false, false,
+                for (int index = 0; index < decimals && index < 48; ++index) {
+                    fraction *= 10.0;
+                    digits[index] = (uint8_t)(uint64_t)fraction;
+                    fraction -= (double)digits[index];
+                }
+                if (decimals > 0 && decimals <= 48) {
+                    int carry = fraction * 10.0 >= 0.5 ? 1 : 0;
+
+                    for (int index = decimals - 1; index >= 0 && carry != 0;
+                         --index) {
+                        if (digits[index] + carry >= 10) {
+                            digits[index] = 0;
+                            carry = 1;
+                        } else {
+                            digits[index] = (uint8_t)(digits[index] + carry);
+                            carry = 0;
+                        }
+                    }
+                    if (carry != 0) {
+                        lead += 1;
+                    }
+                }
+                sink_number(&inner, lead, 10, false, false, -1, false, false,
                             false, false, false);
                 if (decimals > 0) {
                     sink_putc(&inner, '.');
-                }
-                for (int index = 0; index < decimals; ++index) {
-                    uint64_t digit;
-
-                    fraction *= 10.0;
-                    digit = (uint64_t)fraction;
-                    fraction -= (double)digit;
-                    sink_putc(&inner, (char)('0' + digit));
+                    for (int index = 0; index < decimals && index < 48;
+                         ++index) {
+                        sink_putc(&inner, (char)('0' + digits[index]));
+                    }
                 }
             } else {
                 uint64_t integral = (uint64_t)magnitude;
                 double fraction = magnitude - (double)integral;
+                uint8_t digits[48];
 
+                for (int index = 0; index < decimals && index < 48; ++index) {
+                    fraction *= 10.0;
+                    digits[index] = (uint8_t)(uint64_t)fraction;
+                    fraction -= (double)digits[index];
+                }
+                /* Round the last digit rather than truncating, otherwise
+                 * 1414/1000 prints as 1.4139999999999. */
+                if (decimals > 0 && decimals <= 48) {
+                    int carry = 0;
+
+                    if (fraction * 10.0 >= 0.5) {
+                        carry = 1;
+                    }
+                    for (int index = decimals - 1; index >= 0 && carry != 0;
+                         --index) {
+                        if (digits[index] + carry >= 10) {
+                            digits[index] = 0;
+                            carry = 1;
+                        } else {
+                            digits[index] = (uint8_t)(digits[index] + carry);
+                            carry = 0;
+                        }
+                    }
+                    if (carry != 0) {
+                        integral += 1;
+                    }
+                }
                 sink_number(&inner, integral, 10, false, 0, -1, false, false,
                             false, false, false);
                 if (decimals > 0) {
                     sink_putc(&inner, '.');
-                }
-                for (int index = 0; index < decimals; ++index) {
-                    uint64_t digit;
-
-                    fraction *= 10.0;
-                    digit = (uint64_t)fraction;
-                    fraction -= (double)digit;
-                    sink_putc(&inner, (char)('0' + digit));
+                    for (int index = 0; index < decimals && index < 48;
+                         ++index) {
+                        sink_putc(&inner, (char)('0' + digits[index]));
+                    }
                 }
             }
             if (use_exponent) {
@@ -1365,4 +1410,421 @@ double difftime(time_t end, time_t start)
 clock_t clock(void)
 {
     return (clock_t)(pit_ticks() * 1000U / 1000000U);
+}
+
+/* -------------------------------------------------------- lua leftovers ---- */
+/* Lua's locale handling and its bytecode reader/writer reference these even
+ * when the io library and undump are never used, because the code is compiled
+ * in.  A kernel has one locale, so the C locale is the only answer. */
+
+struct lua_locale {
+    char *decimal_point;
+    char *thousands_sep;
+    char *grouping;
+};
+
+static struct lua_locale c_locale = { (char *)".", (char *)"", (char *)"" };
+
+struct lua_locale *localeconv(void)
+{
+    return &c_locale;
+}
+
+int strcoll(const char *left, const char *right)
+{
+    while (*left != 0 && *left == *right) {
+        ++left;
+        ++right;
+    }
+    return (int)(unsigned char)*left - (int)(unsigned char)*right;
+}
+
+size_t strxfrm(char *destination, const char *source, size_t count)
+{
+    size_t at = 0;
+
+    while (source[at] != 0 && at + 1 < count) {
+        destination[at] = source[at];
+        ++at;
+    }
+    destination[at] = 0;
+    return at;
+}
+
+/* Reading and writing precompiled chunks is not supported: there is no
+ * filesystem loader to feed one in, and erroring is better than trusting a
+ * deserialiser. */
+/* Declared with void* so libc.c stays independent of the Lua headers.  Lua
+ * declares them as int(lua_State *, const void *, size_t, int), which is
+ * pointer-compatible, so the definitions match at link time. */
+
+int luaU_dump(void *state, const void *buff, size_t size, int strip)
+{
+    (void)state;
+    (void)buff;
+    (void)size;
+    (void)strip;
+    return 1; /* an error: dumping is not supported */
+}
+
+int luaU_undump(void *state, const void *buff, size_t size, size_t *next)
+{
+    (void)state;
+    (void)buff;
+    (void)size;
+    if (next != 0) {
+        *next = 0;
+    }
+    return 1; /* an error: undumping is not supported */
+}
+
+/* liolib is not built, but lauxlib keeps a read_line helper that references
+ * stdio.  Nothing calls it, so these only need to exist and refuse. */
+
+int feof(void *stream)
+{
+    (void)stream;
+    return 1;
+}
+
+size_t fread(void *destination, size_t size, size_t count, void *stream)
+{
+    (void)destination;
+    (void)size;
+    (void)count;
+    (void)stream;
+    return 0;
+}
+
+int ferror(void *stream)
+{
+    (void)stream;
+    return 0;
+}
+
+/* ------------------------------------------------------------ stdio ---- */
+/* lauxlib carries a line reader and a couple of error helpers that reference
+ * stdio even though the io library is not built.  These satisfy the linker;
+ * the ones that would need a real stream report failure instead of pretending
+ * to work. */
+
+void *stderr = 0;
+void *stdout = 0;
+void *stdin = 0;
+
+int fprintf(void *stream, const char *format, ...)
+{
+    (void)stream;
+    (void)format;
+    return -1;
+}
+
+int vfprintf(void *stream, const char *format, va_list arguments)
+{
+    (void)stream;
+    (void)format;
+    (void)arguments;
+    return -1;
+}
+
+int fputs(const char *text, void *stream)
+{
+    (void)text;
+    (void)stream;
+    return -1;
+}
+
+int fputc(int character, void *stream)
+{
+    (void)character;
+    (void)stream;
+    return -1;
+}
+
+int putchar(int character)
+{
+    (void)character;
+    return -1;
+}
+
+int puts(const char *text)
+{
+    (void)text;
+    return -1;
+}
+
+int fflush(void *stream)
+{
+    (void)stream;
+    return 0;
+}
+
+int getc(void *stream)
+{
+    (void)stream;
+    return -1;
+}
+
+int getchar(void)
+{
+    return -1;
+}
+
+int putc(int character, void *stream)
+{
+    (void)character;
+    (void)stream;
+    return -1;
+}
+
+size_t fwrite(const void *source, size_t size, size_t count, void *stream)
+{
+    (void)source;
+    (void)size;
+    (void)count;
+    (void)stream;
+    return 0;
+}
+
+void setbuf(void *stream, char *buffer)
+{
+    (void)stream;
+    (void)buffer;
+}
+
+int setvbuf(void *stream, char *buffer, int mode, size_t size)
+{
+    (void)stream;
+    (void)buffer;
+    (void)mode;
+    (void)size;
+    return -1;
+}
+
+void perror(const char *text)
+{
+    (void)text;
+}
+
+/* Lua allocates through lua_newstate, but a few code paths call free() on a
+ * pointer that came from malloc().  Route both at the heap so the two agree. */
+void *malloc(size_t bytes)
+{
+    return heap_malloc(bytes);
+}
+
+void *calloc(size_t count, size_t size)
+{
+    return heap_calloc(count, size);
+}
+
+void *realloc(void *address, size_t bytes)
+{
+    return heap_realloc(address, bytes);
+}
+
+void free(void *address)
+{
+    heap_free(address);
+}
+
+/* errno and strerror: lauxlib reports load failures through them.  A kernel
+ * has one global errno slot, which matches the single-task model. */
+static int libc_errno;
+
+int *__errno_location(void)
+{
+    return &libc_errno;
+}
+
+const char *strerror(int code)
+{
+    switch (code) {
+    case 0:
+        return "no error";
+    case 1:
+        return "operation not permitted";
+    case 2:
+        return "no such file or directory";
+    case 5:
+        return "input/output error";
+    case 12:
+        return "out of memory";
+    case 22:
+        return "invalid argument";
+    default:
+        return "unknown error";
+    }
+}
+
+void *fopen(const char *path, const char *mode)
+{
+    (void)path;
+    (void)mode;
+    libc_errno = 2;
+    return 0;
+}
+
+int fclose(void *stream)
+{
+    (void)stream;
+    return 0;
+}
+
+/* --------------------------------------------------- ctype locale tables ---- */
+/* glibc's <ctype.h> resolves isalpha and friends through locale tables rather
+ * than functions.  Lua's libraries include the real header, so the symbols have
+ * to exist even though this kernel is permanently in the C locale.
+ *
+ * The layout is glibc's: a 384 entry int32 table, __ctype_b.  The upper and
+ * lower tables are only ever indexed for the ranges glibc supports, and are
+ * sized the same way. */
+#define CTYPE_TABLE_ENTRIES 384
+
+static const unsigned short int libc_ctype_lower[CTYPE_TABLE_ENTRIES] = {
+    /* 0x00 - 0x1f, control characters map to themselves */
+    0x0000, 0x0001, 0x0002, 0x0003, 0x0004, 0x0005, 0x0006, 0x0007,
+    0x0008, 0x0009, 0x000a, 0x000b, 0x000c, 0x000d, 0x000e, 0x000f,
+    0x0010, 0x0011, 0x0012, 0x0013, 0x0014, 0x0015, 0x0016, 0x0017,
+    0x0018, 0x0019, 0x001a, 0x001b, 0x001c, 0x001d, 0x001e, 0x001f,
+    /* 0x20 - 0x2f: punctuation, unchanged */
+    0x0020, 0x0021, 0x0022, 0x0023, 0x0024, 0x0025, 0x0026, 0x0027,
+    0x0028, 0x0029, 0x002a, 0x002b, 0x002c, 0x002d, 0x002e, 0x002f,
+    /* 0x30 - 0x39: digits, unchanged */
+    0x0030, 0x0031, 0x0032, 0x0033, 0x0034, 0x0035, 0x0036, 0x0037,
+    0x0038, 0x0039,
+    /* 0x3a - 0x40: punctuation, unchanged */
+    0x003a, 0x003b, 0x003c, 0x003d, 0x003e, 0x003f, 0x0040,
+    /* 0x41 - 0x5a: uppercase folds to lowercase */
+    0x0061, 0x0062, 0x0063, 0x0064, 0x0065, 0x0066, 0x0067, 0x0068,
+    0x0069, 0x006a, 0x006b, 0x006c, 0x006d, 0x006e, 0x006f, 0x0070,
+    0x0071, 0x0072, 0x0073, 0x0074, 0x0075, 0x0076, 0x0077, 0x0078,
+    0x0079, 0x007a,
+    /* 0x5b - 0x60: punctuation, unchanged */
+    0x005b, 0x005c, 0x005d, 0x005e, 0x005f, 0x0060,
+    /* 0x61 - 0x7a: lowercase, unchanged */
+    0x0061, 0x0062, 0x0063, 0x0064, 0x0065, 0x0066, 0x0067, 0x0068,
+    0x0069, 0x006a, 0x006b, 0x006c, 0x006d, 0x006e, 0x006f, 0x0070,
+    0x0071, 0x0072, 0x0073, 0x0074, 0x0075, 0x0076, 0x0077, 0x0078,
+    0x0079, 0x007a,
+    /* 0x7b - 0x7f, then 0x80 - 0xff: unchanged, with Latin-1 folding left
+     * as identity because the C locale does not define it */
+    0x007b, 0x007c, 0x007d, 0x007e, 0x007f,
+    0x0080, 0x0081, 0x0082, 0x0083, 0x0084, 0x0085, 0x0086, 0x0087,
+    0x0088, 0x0089, 0x008a, 0x008b, 0x008c, 0x008d, 0x008e, 0x008f,
+    0x0090, 0x0091, 0x0092, 0x0093, 0x0094, 0x0095, 0x0096, 0x0097,
+    0x0098, 0x0099, 0x009a, 0x009b, 0x009c, 0x009d, 0x009e, 0x009f,
+    0x00a0, 0x00a1, 0x00a2, 0x00a3, 0x00a4, 0x00a5, 0x00a6, 0x00a7,
+    0x00a8, 0x00a9, 0x00aa, 0x00ab, 0x00ac, 0x00ad, 0x00ae, 0x00af,
+    0x00b0, 0x00b1, 0x00b2, 0x00b3, 0x00b4, 0x00b5, 0x00b6, 0x00b7,
+    0x00b8, 0x00b9, 0x00ba, 0x00bb, 0x00bc, 0x00bd, 0x00be, 0x00bf,
+    0x00c0, 0x00c1, 0x00c2, 0x00c3, 0x00c4, 0x00c5, 0x00c6, 0x00c7,
+    0x00c8, 0x00c9, 0x00ca, 0x00cb, 0x00cc, 0x00cd, 0x00ce, 0x00cf,
+    0x00d0, 0x00d1, 0x00d2, 0x00d3, 0x00d4, 0x00d5, 0x00d6, 0x00d7,
+    0x00d8, 0x00d9, 0x00da, 0x00db, 0x00dc, 0x00dd, 0x00de, 0x00df,
+    0x00e0, 0x00e1, 0x00e2, 0x00e3, 0x00e4, 0x00e5, 0x00e6, 0x00e7,
+    0x00e8, 0x00e9, 0x00ea, 0x00eb, 0x00ec, 0x00ed, 0x00ee, 0x00ef,
+    0x00f0, 0x00f1, 0x00f2, 0x00f3, 0x00f4, 0x00f5, 0x00f6, 0x00f7,
+    0x00f8, 0x00f9, 0x00fa, 0x00fb, 0x00fc, 0x00fd, 0x00fe, 0x00ff,
+    0x0100, 0x0101, 0x0102, 0x0103, 0x0104, 0x0105, 0x0106, 0x0107,
+    0x0108, 0x0109, 0x010a, 0x010b, 0x010c, 0x010d, 0x010e, 0x010f,
+    0x0110, 0x0111, 0x0112, 0x0113, 0x0114, 0x0115, 0x0116, 0x0117,
+    0x0118, 0x0119, 0x011a, 0x011b, 0x011c, 0x011d, 0x011e, 0x011f,
+    0x0120, 0x0121, 0x0122, 0x0123, 0x0124, 0x0125, 0x0126, 0x0127,
+    0x0128, 0x0129, 0x012a, 0x012b, 0x012c, 0x012d, 0x012e, 0x012f,
+    0x0130, 0x0131, 0x0132, 0x0133, 0x0134, 0x0135, 0x0136, 0x0137,
+    0x0138, 0x0139, 0x013a, 0x013b, 0x013c, 0x013d, 0x013e, 0x013f,
+    0x0140, 0x0141, 0x0142, 0x0143, 0x0144, 0x0145, 0x0146, 0x0147,
+    0x0148, 0x0149, 0x014a, 0x014b, 0x014c, 0x014d, 0x014e, 0x014f,
+    0x0150, 0x0151, 0x0152, 0x0153, 0x0154, 0x0155, 0x0156, 0x0157,
+    0x0158, 0x0159, 0x015a, 0x015b, 0x015c, 0x015d, 0x015e, 0x015f,
+    0x0160, 0x0161, 0x0162, 0x0163, 0x0164, 0x0165, 0x0166, 0x0167,
+    0x0168, 0x0169, 0x016a, 0x016b, 0x016c, 0x016d, 0x016e, 0x016f,
+    0x0170, 0x0171, 0x0172, 0x0173, 0x0174, 0x0175, 0x0176, 0x0177,
+    0x0178, 0x0179, 0x017a, 0x017b, 0x017c, 0x017d, 0x017e, 0x017f,
+};
+
+/* the class bits: _ISalnum _ISalpha _ISblank _IScntrl _ISdigit _ISgraph
+ * _ISlower _ISprint _ISpunct _ISspace _ISupper _ISxdigit, in glibc's order */
+static const int32_t libc_ctype_class[CTYPE_TABLE_ENTRIES] = {
+    /* controls: cntrl */
+    0x0004, 0x0004, 0x0004, 0x0004, 0x0004, 0x0004, 0x0004, 0x0004,
+    0x0004, 0x0004, 0x0004, 0x0004, 0x0004, 0x0004, 0x0004, 0x0004,
+    0x0004, 0x0004, 0x0004, 0x0004, 0x0004, 0x0004, 0x0004, 0x0004,
+    0x0004, 0x0004, 0x0004, 0x0004, 0x0004, 0x0004, 0x0004, 0x0004,
+    /* 0x20-0x23: graph + print */
+    0x0100, 0x0100, 0x0100, 0x0100,
+    /* 0x24-0x26 punct */
+    0x0400, 0x0400, 0x0400,
+    /* 0x27-0x29 punct */
+    0x0400, 0x0400, 0x0400,
+    /* 0x2a-0x2b punct */
+    0x0400, 0x0400,
+    /* 0x2c-0x2f punct */
+    0x0400, 0x0400, 0x0400, 0x0400,
+    /* digits: alnum digit xdigit */
+    0x040a, 0x040a, 0x040a, 0x040a, 0x040a, 0x040a, 0x040a, 0x040a,
+    0x040a, 0x040a,
+    /* 0x3a-0x3b punct, 0x3c-0x3e graph, 0x3f print */
+    0x0400, 0x0400, 0x0100, 0x0100, 0x0100, 0x0100,
+    /* 0x40 punct */
+    0x0400,
+    /* A-Z: alnum alpha print upper xdigit */
+    0x020a, 0x020a, 0x020a, 0x020a, 0x020a, 0x020a, 0x020a, 0x020a,
+    0x020a, 0x020a, 0x020a, 0x020a, 0x020a, 0x020a, 0x020a, 0x020a,
+    0x020a, 0x020a, 0x020a, 0x020a, 0x020a, 0x020a, 0x020a, 0x020a,
+    0x020a, 0x020a,
+    /* 0x5b-0x5e punct, 0x5f print, 0x60 punct */
+    0x0400, 0x0400, 0x0400, 0x0400, 0x0100, 0x0400,
+    /* a-z: alnum alpha lower print */
+    0x020a, 0x020a, 0x020a, 0x020a, 0x020a, 0x020a, 0x020a, 0x020a,
+    0x020a, 0x020a, 0x020a, 0x020a, 0x020a, 0x020a, 0x020a, 0x020a,
+    0x020a, 0x020a, 0x020a, 0x020a, 0x020a, 0x020a, 0x020a, 0x020a,
+    0x020a, 0x020a,
+    /* 0x7b-0x7e punct, 0x7f cntrl */
+    0x0400, 0x0400, 0x0400, 0x0400, 0x0004,
+    /* 0x80-0xff are graph in the C locale */
+    0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100,
+    0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100,
+    0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100,
+    0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100,
+    0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100,
+    0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100,
+    0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100,
+    0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100,
+    0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100,
+    0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100,
+    0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100,
+    0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100,
+    0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100,
+};
+
+const int32_t *__ctype_b_loc(void)
+{
+    return libc_ctype_class;
+}
+
+const int32_t *__ctype_tolower_loc(void)
+{
+    /* the lower table is indexed as unsigned short */
+    return (const int32_t *)(const void *)libc_ctype_lower;
+}
+
+const int32_t *__ctype_toupper_loc(void)
+{
+    return (const int32_t *)(const void *)libc_ctype_lower;
+}
+
+void *fopen64(const char *path, const char *mode)
+{
+    return fopen(path, mode);
+}
+
+void *freopen64(const char *path, const char *mode, void *stream)
+{
+    (void)path;
+    (void)mode;
+    (void)stream;
+    libc_errno = 2;
+    return 0;
 }

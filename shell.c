@@ -8,6 +8,7 @@
 #include "io.h"
 #include "heap.h"
 #include "kby.h"
+#include "lua_host.h"
 #include "kas.h"
 #include "launcher.h"
 #include "kernel.h"
@@ -1744,6 +1745,70 @@ static void cmd_kpm(char **tokens, int count)
     }
 }
 
+
+/* Runs a .lua file from the filesystem.  Without a window this is the quick
+ * way to check a script; `open` gives it a real window instead. */
+static bool cmd_lua(const char *name)
+{
+    static char source[8192];
+    static char path[VFS_PATH_MAX];
+    char error[256];
+    int length;
+
+    if (name[0] == 0) {
+        terminal_puts("lua: missing script name\n");
+        terminal_error();
+        return false;
+    }
+    {
+        static const char *const dirs[2] = { "/home/klye/", "/bin/" };
+        int found = 0;
+
+        path[0] = 0;
+        for (int which = 0; which < 2 && found == 0; ++which) {
+            int at = 0;
+
+            for (int index = 0; dirs[which][index] != 0; ++index) {
+                path[at++] = dirs[which][index];
+            }
+            for (int index = 0; name[index] != 0 &&
+                 at < (int)sizeof(path) - 1; ++index) {
+                path[at++] = name[index];
+            }
+            path[at] = 0;
+            if (vfs_exists(path) != 0) {
+                found = 1;
+            }
+        }
+        if (found == 0) {
+            terminal_puts("lua: no script at ");
+            terminal_puts(name);
+            terminal_puts("\n");
+            terminal_error();
+            return false;
+        }
+    }
+    length = vfs_read(path, source, (uint32_t)sizeof(source));
+    if (length <= 0) {
+        terminal_puts("lua: cannot read ");
+        terminal_puts(path);
+        terminal_puts("\n");
+        terminal_error();
+        return false;
+    }
+    if (lua_host_run_once(name, source, length, error, (int)sizeof(error))) {
+        terminal_puts("lua: ");
+        terminal_puts(path);
+        terminal_puts(" ran with no errors\n");
+        return true;
+    }
+    terminal_puts("lua: ");
+    terminal_puts(error[0] != 0 ? error : "unknown error");
+    terminal_puts("\n");
+    terminal_error();
+    return false;
+}
+
 static void cmd_which(char **tokens, int count)
 {
     if (count < 2) {
@@ -1962,6 +2027,8 @@ void shell_execute(const char *line)
         shell_run_app(argument);
     } else if (text_equal(tokens[0], "heapcheck")) {
         cmd_heapcheck();
+    } else if (text_equal(tokens[0], "lua")) {
+        cmd_lua(argument);
     } else if (text_equal(tokens[0], "kpm")) {
         cmd_kpm(tokens, count);
     } else if (text_equal(tokens[0], "man") || text_equal(tokens[0], "help2")) {

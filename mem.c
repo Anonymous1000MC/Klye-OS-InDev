@@ -70,3 +70,17 @@ int memcmp(const void *left, const void *right, size_t count)
     }
     return 0;
 }
+
+void *memchr(const void *block, int value, size_t count)
+{
+    const unsigned char *scan = (const unsigned char *)block;
+
+    for (size_t index = 0; index < count; ++index) {
+        if (scan[index] == (unsigned char)value) {
+            return (void *)(uintptr_t)&scan[index];
+        }
+    }
+    return 0;
+}
+
+int memcmp(const void *left, const void *right, size_t count);
