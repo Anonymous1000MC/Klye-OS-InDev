@@ -31,6 +31,7 @@ enum wm_action {
 void wm_init(void);
 void wm_service(void);
 void wm_launch_app(enum app_id app);
+void wm_launch_lua(int host_index, const char *title, int width, int height);
 void wm_launch_script(int script_index, const char *title, int width,
                       int height);
 void wm_close_focused(void);

@@ -8,6 +8,7 @@
 #include "input.h"
 #include "kby.h"
 #include "launcher.h"
+#include "lua_host.h"
 #include "kernel.h"
 #include "shell.h"
 #include "theme.h"
@@ -46,6 +47,7 @@ struct wm_window {
     int used;
     int app;
     int script;
+    int lua;
     int x;
     int y;
     int width;
@@ -690,7 +692,7 @@ static void layout_dock(void)
         }
         count++;
     }
-    if (count == 0) {
+    if (count == 0 && launcher_count() == 0) {
         wm.dock_width = 0;
         wm.dock_origin_x = (int)gfx_width() / 2;
         return;
@@ -735,9 +737,8 @@ static void layout_dock(void)
                 cursor += size + THEME_DOCK_ICON_GAP;
             }
         }
-        if (launcher_count() > 0) {
+        if (count != 0 && launcher_count() > 0) {
             struct dock_slot *slot = &wm.slots[wm.slot_count++];
-            int size = (THEME_DOCK_ICON * wm.dock_scale[APP_COUNT - 1]) / 256;
 
             slot->x = cursor;
             slot->width = THEME_DOCK_SEPARATOR_GAP;
@@ -747,7 +748,6 @@ static void layout_dock(void)
             slot->index = wm.slot_count - 1;
             slot->launcher = -1;
             cursor += THEME_DOCK_SEPARATOR_GAP;
-            (void)size;
         }
         for (int index = 0; index < launcher_count(); ++index) {
             int size = (THEME_DOCK_ICON * wm.dock_scale[APP_COUNT - 1]) / 256;
@@ -943,6 +943,10 @@ static void draw_window_content(struct gfx_surface *surface,
 
     if (window->script >= 0) {
         kby_draw(kby_app_at(window->script), surface, x, y, width, height);
+        return;
+    }
+    if (window->lua >= 0) {
+        lua_host_draw(lua_host_at(window->lua), surface, x, y, width, height);
         return;
     }
 
@@ -1599,6 +1603,16 @@ static int find_window_for_script(int script)
     return -1;
 }
 
+static int find_window_for_lua(int host)
+{
+    for (int index = 0; index < WM_WINDOW_LIMIT; ++index) {
+        if (wm.windows[index].used != 0 && wm.windows[index].lua == host) {
+            return index;
+        }
+    }
+    return -1;
+}
+
 static void close_window(int index)
 {
     if (index < 0 || index >= WM_WINDOW_LIMIT) {
@@ -1606,11 +1620,14 @@ static void close_window(int index)
     }
     if (wm.windows[index].script >= 0) {
         kby_unload(kby_app_at(wm.windows[index].script));
+    } else if (wm.windows[index].lua >= 0) {
+        lua_host_unload(lua_host_at(wm.windows[index].lua));
     } else {
         app_close((enum app_id)wm.windows[index].app);
     }
     wm.windows[index].used = 0;
     wm.windows[index].script = -1;
+    wm.windows[index].lua = -1;
     if (wm.focused == index) {
         wm.focused = -1;
         for (int scan = WM_WINDOW_LIMIT - 1; scan >= 0; --scan) {
@@ -1621,6 +1638,60 @@ static void close_window(int index)
         }
     }
     mark_chrome_dirty();
+}
+
+void wm_launch_lua(int host_index, const char *title, int width, int height)
+{
+    int slot = -1;
+    int existing = find_window_for_lua(host_index);
+
+    if (existing >= 0) {
+        focus_window(existing);
+        mark_chrome_dirty();
+        return;
+    }
+    for (int index = 0; index < WM_WINDOW_LIMIT; ++index) {
+        if (wm.windows[index].used == 0) {
+            slot = index;
+            break;
+        }
+    }
+    if (slot < 0) {
+        return;
+    }
+    if (width > (int)gfx_width() - 80) {
+        width = (int)gfx_width() - 80;
+    }
+    if (height > (int)gfx_height() - 160) {
+        height = (int)gfx_height() - 160;
+    }
+    {
+        int offset = wm.window_count * 26;
+
+        if (offset > 150) {
+            offset = 150;
+        }
+        wm.windows[slot].x = 150 + offset;
+        wm.windows[slot].y = desktop_top() + 40 + offset;
+    }
+    __builtin_memset(&wm.windows[slot], 0, sizeof(wm.windows[slot]));
+    wm.windows[slot].used = 1;
+    wm.windows[slot].app = APP_ABOUT;
+    wm.windows[slot].script = -1;
+    wm.windows[slot].lua = host_index;
+    wm.windows[slot].width = width;
+    wm.windows[slot].height = height;
+    wm.windows[slot].restore_x = wm.windows[slot].x;
+    wm.windows[slot].restore_y = wm.windows[slot].y;
+    wm.windows[slot].restore_width = width;
+    wm.windows[slot].restore_height = height;
+    wm.windows[slot].content_dirty = 1;
+    wm.window_count++;
+    wm.next_z++;
+    wm.windows[slot].z = wm.next_z;
+    wm.focused = slot;
+    mark_chrome_dirty();
+    (void)title;
 }
 
 void wm_launch_script(int script_index, const char *title, int width,
@@ -1658,9 +1729,13 @@ void wm_launch_script(int script_index, const char *title, int width,
         wm.windows[slot].x = 120 + offset;
         wm.windows[slot].y = desktop_top() + 34 + offset;
     }
+    /* wipe the whole slot: a recycled window otherwise keeps the previous
+     * occupant's script or lua index and the window claims to be both */
+    __builtin_memset(&wm.windows[slot], 0, sizeof(wm.windows[slot]));
     wm.windows[slot].used = 1;
     wm.windows[slot].app = 0;
     wm.windows[slot].script = script_index;
+    wm.windows[slot].lua = -1;
     wm.windows[slot].width = width;
     wm.windows[slot].height = height;
     wm.windows[slot].restore_x = wm.windows[slot].x;
@@ -1750,9 +1825,11 @@ void wm_launch_app(enum app_id app)
         wm.windows[slot].x = 120 + offset;
         wm.windows[slot].y = desktop_top() + 34 + offset;
     }
+    __builtin_memset(&wm.windows[slot], 0, sizeof(wm.windows[slot]));
     wm.windows[slot].used = 1;
     wm.windows[slot].app = app;
     wm.windows[slot].script = -1;
+    wm.windows[slot].lua = -1;
     wm.windows[slot].width = width;
     wm.windows[slot].height = height;
     wm.windows[slot].restore_x = wm.windows[slot].x;
@@ -2176,6 +2253,11 @@ static void handle_key(const struct key_event *event)
                          event->pressed != 0U);
             return;
         }
+        if (wm.windows[wm.focused].lua >= 0) {
+            lua_host_push_key(lua_host_at(wm.windows[wm.focused].lua),
+                              event->code, event->pressed != 0U);
+            return;
+        }
         wm.heartbeat[app] = pit_ticks();
         if (app == APP_TERMINAL) {
             terminal_handle_key(event);
@@ -2417,6 +2499,35 @@ static void service_scripts(void)
     }
 }
 
+/* Steps the Lua hosts once per composited frame rather than once per service
+ * call.  wm_service runs at the timer rate, and a script that repaints on
+ * every one of those is both wasteful and enough to hold the whole compositor
+ * down to the frame rate. */
+static void service_lua(void)
+{
+    for (int index = 0; index < WM_WINDOW_LIMIT; ++index) {
+        struct lua_host *host;
+
+        if (wm.windows[index].used == 0 || wm.windows[index].lua < 0) {
+            continue;
+        }
+        host = lua_host_at(wm.windows[index].lua);
+        if (host == 0) {
+            continue;
+        }
+        lua_host_set_mouse(host, wm.mouse_x - wm.windows[index].x,
+                           wm.mouse_y - wm.windows[index].y -
+                               THEME_TITLEBAR_HEIGHT,
+                           (wm.mouse_buttons & MOUSE_BUTTON_LEFT) != 0U);
+        if (lua_host_loaded(host) == false) {
+            /* a failed script keeps its last good frame on screen */
+            continue;
+        }
+        lua_host_service(host);
+        wm.windows[index].content_dirty = 1;
+    }
+}
+
 void wm_service(void)
 {
     struct mouse_event mouse_event;
@@ -2506,6 +2617,7 @@ void wm_service(void)
         return;
     }
     wm.last_frame_q16 += FRAME_INTERVAL_Q16;
+    service_lua();
     if (now - wm.last_frame_q16 > FRAME_INTERVAL_Q16 * 4ULL) {
         wm.last_frame_q16 = now;
     }

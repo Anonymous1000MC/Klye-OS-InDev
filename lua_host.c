@@ -47,6 +47,11 @@ struct lua_host {
     char title[48];
     char error[LUA_ERROR_MAX];
     lua_State *state;
+    /* Registry references to the script's optional callbacks, resolved once
+     * at load time.  Looking them up by name every frame meant a hash lookup
+     * per callback per frame for a function that never changes. */
+    int update_ref;
+    int paint_ref;
     struct lua_draw draw[LUA_DRAW_MAX];
     int draw_count;
     int mouse_x;
@@ -129,31 +134,41 @@ static uint32_t lua_colour(lua_State *L, int index)
     return (uint32_t)(0xFF000000U | ((uint32_t)packed & 0x00FFFFFFU));
 }
 
-static int host_rect(lua_State *L)
+/* ctx members are invoked as methods (ctx:f(...)), so argument 1 is the ctx
+ * table itself and the real arguments start at index 2.  Every arity check
+ * below therefore counts the implicit self. */
+
+/* Drawing coordinates are ordinary numbers.  Requiring an exact integer
+ * would force every script to floor() the result of its own arithmetic, which
+ * is a pointless trap for an API that ends up truncating to pixels anyway. */
+static int32_t ctx_int(lua_State *L, int index)
+{
+    return (int32_t)luaL_checknumber(L, index);
+}
+
+static int host_clear(lua_State *L)
 {
     struct lua_host *host = (struct lua_host *)lua_touserdata(L, lua_upvalueindex(1));
 
-    if (lua_gettop(L) < 4) {
-        return luaL_error(L, "rect expects x, y, w, h");
+    if (lua_gettop(L) < 6) {
+        return luaL_error(L, "clear expects x, y, w, h, colour");
     }
-    draw_push(host, 1, (int32_t)luaL_checkinteger(L, 1),
-              (int32_t)luaL_checkinteger(L, 2),
-              (int32_t)luaL_checkinteger(L, 3),
-              (int32_t)luaL_checkinteger(L, 4), 0, 0xFF232B3DU, 0);
+    draw_push(host, 1, ctx_int(L, 2), ctx_int(L, 3),
+              ctx_int(L, 4), ctx_int(L, 5), 0,
+              lua_colour(L, 6), 0);
     return 0;
 }
 
-static int host_colour_rect(lua_State *L)
+static int host_fill(lua_State *L)
 {
     struct lua_host *host = (struct lua_host *)lua_touserdata(L, lua_upvalueindex(1));
 
-    if (lua_gettop(L) < 5) {
+    if (lua_gettop(L) < 6) {
         return luaL_error(L, "fill expects x, y, w, h, colour");
     }
-    draw_push(host, 1, (int32_t)luaL_checkinteger(L, 1),
-              (int32_t)luaL_checkinteger(L, 2),
-              (int32_t)luaL_checkinteger(L, 3),
-              (int32_t)luaL_checkinteger(L, 4), 0, lua_colour(L, 5), 0);
+    draw_push(host, 1, ctx_int(L, 2), ctx_int(L, 3),
+              ctx_int(L, 4), ctx_int(L, 5), 0,
+              lua_colour(L, 6), 0);
     return 0;
 }
 
@@ -162,46 +177,42 @@ static int host_rounded(lua_State *L)
     struct lua_host *host = (struct lua_host *)lua_touserdata(L, lua_upvalueindex(1));
     int32_t radius = 6;
 
-    if (lua_gettop(L) < 4) {
-        return luaL_error(L, "rounded expects x, y, w, h [, radius]");
+    if (lua_gettop(L) < 5) {
+        return luaL_error(L, "rounded expects x, y, w, h [, radius [, colour]]");
     }
-    if (lua_gettop(L) >= 5) {
-        radius = (int32_t)luaL_checkinteger(L, 5);
+    if (lua_gettop(L) >= 6) {
+        radius = ctx_int(L, 6);
     }
-    draw_push(host, 2, (int32_t)luaL_checkinteger(L, 1),
-              (int32_t)luaL_checkinteger(L, 2),
-              (int32_t)luaL_checkinteger(L, 3),
-              (int32_t)luaL_checkinteger(L, 4), radius,
-              lua_gettop(L) >= 6 ? lua_colour(L, 6) : 0xFF6FD3FFU, 0);
+    draw_push(host, 2, ctx_int(L, 2), ctx_int(L, 3),
+              ctx_int(L, 4), ctx_int(L, 5), radius,
+              lua_gettop(L) >= 7 ? lua_colour(L, 7) : 0xFF6FD3FFU, 0);
     return 0;
 }
 
 static int host_text(lua_State *L)
 {
     struct lua_host *host = (struct lua_host *)lua_touserdata(L, lua_upvalueindex(1));
-    const char *text = luaL_checkstring(L, 3);
+    const char *text;
 
-    if (lua_gettop(L) < 3) {
+    if (lua_gettop(L) < 4) {
         return luaL_error(L, "text expects x, y, string [, colour]");
     }
-    draw_push(host, 3, (int32_t)luaL_checkinteger(L, 1),
-              (int32_t)luaL_checkinteger(L, 2), 0, 0, 0,
-              lua_gettop(L) >= 4 ? lua_colour(L, 4) : 0xFFE8EAF0U, text);
+    text = luaL_checkstring(L, 4);
+    draw_push(host, 3, ctx_int(L, 2), ctx_int(L, 3), 0, 0, 0,
+              lua_gettop(L) >= 5 ? lua_colour(L, 5) : 0xFFE8EAF0U, text);
     return 0;
 }
 
 static int host_circle(lua_State *L)
 {
     struct lua_host *host = (struct lua_host *)lua_touserdata(L, lua_upvalueindex(1));
-    int32_t radius;
 
-    if (lua_gettop(L) < 3) {
+    if (lua_gettop(L) < 4) {
         return luaL_error(L, "circle expects x, y, radius [, colour]");
     }
-    radius = (int32_t)luaL_checkinteger(L, 3);
-    draw_push(host, 4, (int32_t)luaL_checkinteger(L, 1),
-              (int32_t)luaL_checkinteger(L, 2), radius, 0, 0,
-              lua_gettop(L) >= 4 ? lua_colour(L, 4) : 0xFFE8EAF0U, 0);
+    draw_push(host, 4, ctx_int(L, 2), ctx_int(L, 3),
+              ctx_int(L, 4), 0, 0,
+              lua_gettop(L) >= 5 ? lua_colour(L, 5) : 0xFFE8EAF0U, 0);
     return 0;
 }
 
@@ -209,13 +220,12 @@ static int host_line(lua_State *L)
 {
     struct lua_host *host = (struct lua_host *)lua_touserdata(L, lua_upvalueindex(1));
 
-    if (lua_gettop(L) < 3) {
+    if (lua_gettop(L) < 4) {
         return luaL_error(L, "line expects x, y, width [, colour]");
     }
-    draw_push(host, 5, (int32_t)luaL_checkinteger(L, 1),
-              (int32_t)luaL_checkinteger(L, 2),
-              (int32_t)luaL_checkinteger(L, 3), 0, 0,
-              lua_gettop(L) >= 4 ? lua_colour(L, 4) : 0xFF8B95A8U, 0);
+    draw_push(host, 5, ctx_int(L, 2), ctx_int(L, 3),
+              ctx_int(L, 4), 0, 0,
+              lua_gettop(L) >= 5 ? lua_colour(L, 5) : 0xFF8B95A8U, 0);
     return 0;
 }
 
@@ -297,11 +307,11 @@ static void register_ctx(lua_State *L, struct lua_host *host)
     lua_newtable(L);
 
     lua_pushlightuserdata(L, host);
-    lua_pushcclosure(L, host_rect, 1);
+    lua_pushcclosure(L, host_clear, 1);
     lua_setfield(L, -2, "clear");
 
     lua_pushlightuserdata(L, host);
-    lua_pushcclosure(L, host_colour_rect, 1);
+    lua_pushcclosure(L, host_fill, 1);
     lua_setfield(L, -2, "fill");
 
     lua_pushlightuserdata(L, host);
@@ -346,7 +356,12 @@ static void register_ctx(lua_State *L, struct lua_host *host)
     lua_pushstring(L, "klye-lua");
     lua_setfield(L, -2, "runtime");
 
+    /* Keep it in the registry for passing to paint(ctx), and also publish it
+     * as the global `ctx` so a script can use it from update() as well, which
+     * is the usual shape for a game style callback pair. */
+    lua_pushvalue(L, -1);
     lua_setfield(L, LUA_REGISTRYINDEX, "klye.ctx");
+    lua_setglobal(L, "ctx");
 }
 
 /* --------------------------------------------------------------- errors ---- */
@@ -383,6 +398,16 @@ struct lua_host *lua_host_at(int index)
         return 0;
     }
     return &hosts[index];
+}
+
+int lua_host_index(const struct lua_host *host)
+{
+    for (int index = 0; index < LUA_HOST_LIMIT; ++index) {
+        if (&hosts[index] == host) {
+            return index;
+        }
+    }
+    return -1;
 }
 
 struct lua_host *lua_host_find(const char *name)
@@ -462,6 +487,8 @@ struct lua_host *lua_host_load(const char *name, const char *source, int length,
         return 0;
     }
     host->error[0] = 0;
+    host->update_ref = 0;
+    host->paint_ref = 0;
     L = lua_newstate(host_alloc, 0);
     if (L == 0) {
         host->used = false;
@@ -495,6 +522,21 @@ struct lua_host *lua_host_load(const char *name, const char *source, int length,
         }
         return host;
     }
+    /* Resolve the optional callbacks once, so the per frame path never
+     * hashes.  luaL_ref answers LUA_NOREF or LUA_REFNIL for a missing global,
+     * and a raw get of either would index the registry out of bounds, so the
+     * result is clamped to a non positive "not present". */
+    lua_getglobal(L, "update");
+    host->update_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    if (host->update_ref <= 0) {
+        host->update_ref = 0;
+    }
+    lua_getglobal(L, "paint");
+    host->paint_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    if (host->paint_ref <= 0) {
+        host->paint_ref = 0;
+    }
+
     /* An optional returned table may carry a title. */
     if (lua_istable(L, -1)) {
         lua_getfield(L, -1, "title");
@@ -534,6 +576,16 @@ void lua_host_unload(struct lua_host *host)
 bool lua_host_loaded(const struct lua_host *host)
 {
     return host != 0 && host->used != 0 && host->failed == false;
+}
+
+uint32_t lua_host_frame(const struct lua_host *host)
+{
+    return host != 0 ? host->frame : 0U;
+}
+
+int lua_host_draw_count(const struct lua_host *host)
+{
+    return host != 0 ? host->draw_count : 0;
 }
 
 const char *lua_host_title(const struct lua_host *host)
@@ -577,6 +629,46 @@ void lua_host_push_key(struct lua_host *host, uint32_t code, bool pressed)
     host->key_tail = next;
 }
 
+/* Calls one of the script's optional callbacks.
+ *
+ * Stack discipline is the whole subtlety here: lua_pcall removes the function
+ * and its arguments itself, so the function must not be popped again on the
+ * success path.  Getting that wrong underflows the Lua stack by one slot per
+ * frame, which quietly corrupts the interpreter's internals instead of
+ * failing loudly. */
+static bool call_callback(struct lua_host *host, int reference,
+                          const char *label, int extra)
+{
+    lua_State *L = host->state;
+    bool ok = true;
+
+    if (reference <= 0) {
+        return true;
+    }
+    lua_rawgeti(L, LUA_REGISTRYINDEX, reference);
+    if (lua_isfunction(L, -1) == false) {
+        lua_pop(L, 1);
+        return true;
+    }
+    if (extra != 0) {
+        lua_getfield(L, LUA_REGISTRYINDEX, "klye.ctx");
+    } else {
+        lua_pushnumber(L, 1.0 / 60.0);
+    }
+    if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+        copy_error(host, lua_tostring(L, -1));
+        host->failed = true;
+        ok = false;
+    }
+    /* pcall consumed the function and the argument; on failure it left the
+     * error message behind, and either way we are back at the entry depth. */
+    if (ok == false) {
+        lua_pop(L, 1);
+    }
+    (void)label;
+    return ok;
+}
+
 void lua_host_service(struct lua_host *host)
 {
     lua_State *L;
@@ -588,31 +680,18 @@ void lua_host_service(struct lua_host *host)
     host->draw_count = 0;
     host->yielded = false;
     ++host->frame;
-
-    /* update(dt) first, then paint(ctx), both optional. */
-    lua_getglobal(L, "update");
-    if (lua_isfunction(L, -1)) {
-        lua_pushnumber(L, 1.0 / 60.0);
-        if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
-            copy_error(host, lua_tostring(L, -1));
-            host->failed = true;
-            lua_pop(L, 1);
-            return;
-        }
+    /* the global ctx carries a live frame counter, so publish the new value */
+    lua_getglobal(L, "ctx");
+    if (lua_istable(L, -1)) {
+        lua_pushinteger(L, (lua_Integer)host->frame);
+        lua_setfield(L, -2, "frame_count");
     }
     lua_pop(L, 1);
 
-    lua_getglobal(L, "paint");
-    if (lua_isfunction(L, -1)) {
-        lua_getfield(L, LUA_REGISTRYINDEX, "klye.ctx");
-        if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
-            copy_error(host, lua_tostring(L, -1));
-            host->failed = true;
-            lua_pop(L, 1);
-            return;
-        }
+    if (call_callback(host, host->update_ref, "update", 0) == false) {
+        return;
     }
-    lua_pop(L, 1);
+    call_callback(host, host->paint_ref, "paint", 1);
 }
 
 void lua_host_draw(struct lua_host *host, struct gfx_surface *surface, int x,

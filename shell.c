@@ -7,6 +7,8 @@
 #include "input.h"
 #include "io.h"
 #include "heap.h"
+extern long strtol(const char *text, char **end, int base);
+
 #include "kby.h"
 #include "lua_host.h"
 #include "kas.h"
@@ -1378,6 +1380,9 @@ static void take_path(char *out, int max, const char *path)
     out[used] = 0;
 }
 
+static bool shell_run_script(const char *name);
+static bool shell_run_lua(const char *name);
+
 static int shell_launcher_target(const char *name, char *entry, int entry_max)
 {
     int slot = launcher_resolve(name);
@@ -1387,7 +1392,10 @@ static int shell_launcher_target(const char *name, char *entry, int entry_max)
         if (launcher_is_builtin(slot, entry, entry_max)) {
             return app_from_name(entry);
         }
-        return -2;
+        if (launcher_is_bytecode(slot)) {
+            return -2;
+        }
+        return -3;
     }
     builtin = app_from_name(name);
     if (builtin >= 0) {
@@ -1451,6 +1459,9 @@ bool shell_run_app(const char *name)
 
     if (builtin == -2) {
         return shell_run_script(name);
+    }
+    if (builtin == -3) {
+        return shell_run_lua(name);
     }
     if (builtin < 0) {
         terminal_puts("open: unknown application '");
@@ -1555,6 +1566,92 @@ static void kpm_list(void)
     }
 }
 
+/* kpm build handles two kinds of source.  A .kby file is assembled to bytecode
+ * in the kernel; a .lua file is copied verbatim, because Lua is interpreted and
+ * needs no build step.  Either way the result lands in /bin next to a launcher
+ * record so it appears in the dock. */
+static bool kpm_install_lua(const char *name)
+{
+    static char source[8192];
+    char source_path[VFS_PATH_MAX];
+    char script_path[VFS_PATH_MAX];
+    char record_path[VFS_PATH_MAX];
+    char stem[LAUNCHER_NAME_MAX];
+    char entry[LAUNCHER_ENTRY_MAX];
+    char line[LAUNCHER_NAME_MAX * 2 + 96];
+    int length;
+    int at;
+
+    if (kpm_stem(name, ".lua", stem, (int)sizeof(stem)) == false) {
+        kpm_report("build", "name must end in .lua");
+        return false;
+    }
+    {
+        static const char prefix[] = "/home/klye/";
+        int used = 0;
+
+        for (int index = 0; prefix[index] != 0; ++index) {
+            source_path[used++] = prefix[index];
+        }
+        for (int index = 0; name[index] != 0 &&
+             used < (int)sizeof(source_path) - 1; ++index) {
+            source_path[used++] = name[index];
+        }
+        source_path[used] = 0;
+    }
+    if (vfs_exists(source_path) == false) {
+        terminal_puts("kpm build: no source at ");
+        terminal_puts(source_path);
+        terminal_puts("\n");
+        terminal_error();
+        return false;
+    }
+    length = vfs_read(source_path, source, (uint32_t)sizeof(source));
+    if (length <= 0) {
+        terminal_puts("kpm build: cannot read ");
+        terminal_puts(source_path);
+        terminal_puts("\n");
+        terminal_error();
+        return false;
+    }
+    kpm_bin_path(stem, ".lua", script_path, (int)sizeof(script_path));
+    if (vfs_write(script_path, source, (uint32_t)length) < 0) {
+        kpm_report("build", "cannot write the script");
+        return false;
+    }
+    kpm_bin_path(stem, "", record_path, (int)sizeof(record_path));
+    take_path(entry, (int)sizeof(entry), stem);
+    {
+        static const char head1[] = "title=";
+        static const char head2[] = "\nkind=lua\nentry=";
+        static const char tail[] = ".lua\nicon=-1\n";
+
+        at = 0;
+        text_copy(line + at, head1, (int)sizeof(line) - at);
+        at += (int)sizeof(head1) - 1;
+        text_copy(line + at, stem, (int)sizeof(line) - at);
+        at += text_length(stem);
+        text_copy(line + at, head2, (int)sizeof(line) - at);
+        at += (int)sizeof(head2) - 1;
+        text_copy(line + at, entry, (int)sizeof(line) - at);
+        at += text_length(entry);
+        text_copy(line + at, tail, (int)sizeof(line) - at);
+        at += (int)sizeof(tail) - 1;
+        line[at] = 0;
+    }
+    if (vfs_write(record_path, line, (uint32_t)at) < 0) {
+        kpm_report("build", "cannot write the launcher record");
+        return false;
+    }
+    launcher_scan();
+    terminal_puts("installed ");
+    terminal_puts(stem);
+    terminal_puts(" (lua, ");
+    shell_printf_u64((uint64_t)length);
+    terminal_puts(" bytes)\n");
+    return true;
+}
+
 static bool kpm_build(const char *name)
 {
     static char source[KPM_SOURCE_MAX];
@@ -1570,8 +1667,11 @@ static bool kpm_build(const char *name)
     int bytes = 0;
     int at = 0;
 
+    if (kpm_stem(name, ".lua", stem, (int)sizeof(stem))) {
+        return kpm_install_lua(name);
+    }
     if (kpm_stem(name, ".kby", stem, (int)sizeof(stem)) == false) {
-        kpm_report("build", "name must end in .kby");
+        kpm_report("build", "name must end in .kby or .lua");
         return false;
     }
     /* look in the home directory, then in the kby source folder */
@@ -1597,27 +1697,8 @@ static bool kpm_build(const char *name)
         }
     }
     if (source_path[0] == 0) {
-        char missing[VFS_PATH_MAX];
-        int used = 0;
-        const char *home = "/home/klye/";
-
-        for (int index = 0; home[index] != 0; ++index) {
-            missing[used++] = home[index];
-        }
-        for (int index = 0; name[index] != 0 &&
-             used < (int)sizeof(missing) - 1; ++index) {
-            missing[used++] = name[index];
-        }
-        missing[used] = 0;
         terminal_puts("kpm build: no source at ");
-        terminal_puts(missing);
-        terminal_puts("\n");
-        terminal_error();
-        return false;
-    }
-    if (vfs_exists(source_path) == false) {
-        terminal_puts("kpm build: no source at ");
-        terminal_puts(source_path);
+        terminal_puts(name);
         terminal_puts("\n");
         terminal_error();
         return false;
@@ -1671,27 +1752,7 @@ static bool kpm_build(const char *name)
     terminal_puts("installed ");
     terminal_puts(record);
     terminal_puts(" (");
-    {
-        char digits[12];
-        int used = 0;
-        int value = bytes;
-
-        if (value == 0) {
-            digits[used++] = '0';
-        }
-        while (value > 0 && used < 11) {
-            digits[used++] = (char)('0' + value % 10);
-            value /= 10;
-        }
-        while (used > 0) {
-            char one[2];
-
-            --used;
-            one[0] = digits[used];
-            one[1] = 0;
-            terminal_puts(one);
-        }
-    }
+    shell_printf_u64((uint64_t)bytes);
     terminal_puts(" bytes)\n");
     return true;
 }
@@ -1715,6 +1776,12 @@ static bool kpm_remove(const char *name)
     vfs_delete(record_path);
     kpm_bin_path(stem, ".kbin", binary_path, (int)sizeof(binary_path));
     vfs_delete(binary_path);
+    {
+        char script_path[VFS_PATH_MAX];
+
+        kpm_bin_path(stem, ".lua", script_path, (int)sizeof(script_path));
+        vfs_delete(script_path);
+    }
     launcher_scan();
     terminal_puts("removed ");
     terminal_puts(stem);
@@ -1807,6 +1874,133 @@ static bool cmd_lua(const char *name)
     terminal_puts("\n");
     terminal_error();
     return false;
+}
+
+/* Loads a .lua launcher into a windowed host.  The window manager keeps the
+ * host alive, so a Lua app owns a real lua_State for as long as its window is
+ * open and keeps whatever tables and closures the script created. */
+static bool shell_run_lua(const char *name)
+{
+    static char source[8192];
+    int slot = launcher_resolve(name);
+    const struct launcher *item;
+    char path[VFS_PATH_MAX];
+    char error[256];
+    struct lua_host *host;
+    int length;
+
+    if (slot < 0) {
+        terminal_puts("open: '");
+        terminal_puts(name);
+        terminal_puts("': no such program in /bin\n");
+        terminal_error();
+        return false;
+    }
+    item = launcher_at(slot);
+    if (item == 0) {
+        terminal_puts("open: bad launcher record\n");
+        terminal_error();
+        return false;
+    }
+    take_path(path, (int)sizeof(path), item->entry);
+    vfs_absolute_of(path, "/", path, (int)sizeof(path));
+    if (vfs_exists(path) == false) {
+        terminal_puts("open: ");
+        terminal_puts(path);
+        terminal_puts(": script not found\n");
+        terminal_error();
+        return false;
+    }
+    length = vfs_read(path, source, (uint32_t)sizeof(source));
+    if (length <= 0) {
+        terminal_puts("open: cannot read ");
+        terminal_puts(path);
+        terminal_puts("\n");
+        terminal_error();
+        return false;
+    }
+    host = lua_host_load(item->file, source, length, error, (int)sizeof(error));
+    if (host == 0) {
+        terminal_puts("open: ");
+        terminal_puts(error[0] != 0 ? error : "cannot start");
+        terminal_puts("\n");
+        terminal_error();
+        return false;
+    }
+    if (lua_host_loaded(host) == false) {
+        terminal_puts("open: ");
+        terminal_puts(lua_host_error(host) != 0 ? lua_host_error(host)
+                                                : "script error");
+        terminal_puts("\n");
+        terminal_error();
+        return true;
+    }
+    wm_launch_lua(lua_host_index(host), item->title, 520, 380);
+    return true;
+}
+
+/* Services a lua host synchronously, for tests that need to know whether a
+ * fault is in the interpreter or in the task context it runs under. */
+static bool cmd_luastep(const char *name, uint32_t times)
+{
+    static char source[8192];
+    char path[VFS_PATH_MAX];
+    char error[256];
+    struct lua_host *host;
+    int length;
+    int at = 0;
+
+    while (at < (int)sizeof(path) - 1 && name[at] != 0) {
+        path[at] = name[at];
+        ++at;
+    }
+    path[at] = 0;
+    if (path[0] != '/') {
+        static const char prefix[] = "/home/klye/";
+
+        at = 0;
+        for (int index = 0; prefix[index] != 0; ++index) {
+            path[at++] = prefix[index];
+        }
+        for (int index = 0; name[index] != 0 && at < (int)sizeof(path) - 1;
+             ++index) {
+            path[at++] = name[index];
+        }
+        path[at] = 0;
+    }
+    length = vfs_read(path, source, (uint32_t)sizeof(source));
+    if (length <= 0) {
+        terminal_puts("luastep: cannot read ");
+        terminal_puts(path);
+        terminal_puts("\n");
+        terminal_error();
+        return false;
+    }
+    host = lua_host_load("step", source, length, error, (int)sizeof(error));
+    if (host == 0) {
+        terminal_puts("luastep: ");
+        terminal_puts(error);
+        terminal_puts("\n");
+        terminal_error();
+        return false;
+    }
+    for (uint32_t step = 0; step < times; ++step) {
+        lua_host_service(host);
+    }
+    terminal_puts("luastep: ");
+    shell_printf_u64((uint64_t)times);
+    terminal_puts(" steps, frame ");
+    shell_printf_u64((uint64_t)lua_host_frame(host));
+    terminal_puts(", draw ");
+    shell_printf_u64((uint64_t)lua_host_draw_count(host));
+    terminal_puts("\n");
+    if (lua_host_loaded(host) == false) {
+        terminal_puts("luastep: failed: ");
+        terminal_puts(lua_host_error(host) != 0 ? lua_host_error(host) : "?");
+        terminal_puts("\n");
+    }
+    lua_host_unload(host);
+    return true;
 }
 
 static void cmd_which(char **tokens, int count)
@@ -2027,6 +2221,13 @@ void shell_execute(const char *line)
         shell_run_app(argument);
     } else if (text_equal(tokens[0], "heapcheck")) {
         cmd_heapcheck();
+    } else if (text_equal(tokens[0], "luastep")) {
+        uint32_t times = 200;
+
+        if (count > 2) {
+            times = (uint32_t)strtol(tokens[2], 0, 10);
+        }
+        cmd_luastep(argument, times);
     } else if (text_equal(tokens[0], "lua")) {
         cmd_lua(argument);
     } else if (text_equal(tokens[0], "kpm")) {

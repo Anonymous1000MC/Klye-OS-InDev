@@ -29,6 +29,8 @@ struct lua_host *lua_host_load(const char *name, const char *source,
 void lua_host_unload(struct lua_host *host);
 
 bool lua_host_loaded(const struct lua_host *host);
+uint32_t lua_host_frame(const struct lua_host *host);
+int lua_host_draw_count(const struct lua_host *host);
 const char *lua_host_title(const struct lua_host *host);
 const char *lua_host_error(const struct lua_host *host);
 
@@ -42,6 +44,8 @@ void lua_host_push_key(struct lua_host *host, uint32_t code, bool pressed);
 
 int lua_host_count(void);
 struct lua_host *lua_host_at(int index);
+/* The reverse of lua_host_at, so a host can be handed to the window manager. */
+int lua_host_index(const struct lua_host *host);
 struct lua_host *lua_host_find(const char *name);
 
 /* Runs a chunk for its side effects only, used by the `lua` shell command. */

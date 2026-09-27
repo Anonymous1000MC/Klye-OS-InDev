@@ -10,3 +10,12 @@ that have no libc to compare against on the host. Run it with:
 
 The printf expectations were taken from glibc so the kernel's hand written
 formatter stays compatible with what Lua expects.
+
+`tools/qemu_harness.py` boots the ISO under QEMU and drives it over QMP:
+`Guest.boot()` waits for the desktop, `run([...])` types commands into the
+terminal, `gdb([...])` reads guest symbols, and `ppm_pixel`/`ppm_count` inspect
+a screendump.  It lives in the repo because /tmp gets cleaned.
+
+Note that `Guest.boot()` has to wait for the splash animation to finish: before
+the desktop is up the dock is empty, so a test that clicks an icon too early
+finds nothing and silently does nothing.

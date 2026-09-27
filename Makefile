@@ -78,13 +78,24 @@ $(ROOTFS)/bin/%.kbin: $(ROOTFS)/home/klye/kby/%.kby $(BUILD_DIR)/kbasm
 	$(BUILD_DIR)/kbasm $< $@
 
 KBY_SOURCES := $(shell find $(ROOTFS)/home -name '*.kby' 2>/dev/null)
-# only programs named by a "kind = kby" launcher are staged into /bin
-KBY_BIN_PROGRAMS := $(patsubst %,$(ROOTFS)/bin/%,$(shell sed -n 's/^kind *= *kby$$//p' $(ROOTFS)/bin/* 2>/dev/null >/dev/null; for l in $(ROOTFS)/bin/*; do \
-  if grep -q '^kind *= *kby$$' $$l 2>/dev/null; then \
-    grep '^entry *= *' $$l | sed 's/^entry *= *//'; fi; done))
+# Only programs named by a "kind = kby" launcher are staged into /bin.
+define launcher_entries
+	for l in $(ROOTFS)/bin/*; do \
+	  if grep -q "^kind *= *$(1)$$" $$l 2>/dev/null; then \
+	    grep '^entry *= *' $$l | sed 's/^entry *= *//'; fi; \
+	done
+endef
+KBY_BIN_PROGRAMS := $(patsubst %,$(ROOTFS)/bin/%,$(shell $(call launcher_entries,kby)))
 KBY_BINARIES := $(KBY_SOURCES:.kby=.kbin) $(KBY_BIN_PROGRAMS)
 
-$(VFS_IMAGE): $(BUILD_DIR)/mkvfs $(KBY_BINARIES) \
+# Lua scripts are not compiled, so a "kind = lua" launcher only needs its
+# source copied next to the record where the entry name can find it.
+LUA_BIN_SCRIPTS := $(patsubst %,$(ROOTFS)/bin/%,$(shell $(call launcher_entries,lua)))
+
+$(ROOTFS)/bin/%.lua: $(ROOTFS)/home/klye/lua/%.lua
+	cp $< $@
+
+$(VFS_IMAGE): $(BUILD_DIR)/mkvfs $(KBY_BINARIES) $(LUA_BIN_SCRIPTS) \
              $(shell find $(ROOTFS) -type f ! -name '*.kby' 2>/dev/null)
 	$(BUILD_DIR)/mkvfs $(ROOTFS) $@
 

@@ -156,15 +156,11 @@ static void parse_record(struct launcher *slot, const char *body)
 
 void launcher_reset(void)
 {
+    /* wipe the whole slot: a shorter name would otherwise leave the tail of
+     * the previous entry visible after its terminator */
     for (int index = 0; index < LAUNCHER_MAX; ++index) {
-        launchers[index].used = false;
+        __builtin_memset(&launchers[index], 0, sizeof(launchers[index]));
         launchers[index].icon = -1;
-        launchers[index].title[0] = 0;
-        launchers[index].kind[0] = 0;
-        launchers[index].entry[0] = 0;
-        launchers[index].file[0] = 0;
-        launchers[index].path[0] = 0;
-        launchers[index].is_record = false;
     }
     launcher_used = 0;
 }
