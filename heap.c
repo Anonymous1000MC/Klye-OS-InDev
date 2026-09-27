@@ -25,9 +25,12 @@
 /* Upper bound on trailing free pages folded into a run (256 KiB). */
 #define HEAP_RUN_ABSORB_MAX 64U
 
-/* Below this much RAM the pool stays disabled rather than starving a small
- * machine of the memory the kernel still needs. */
-#define HEAP_MIN_RAM (48ULL * 1024ULL * 1024ULL)
+/* Below this much RAM the pool stays disabled.  The bar is deliberately low:
+ * a minimal boot needs the 12 MiB graphics arena plus six 128 KiB task
+ * stacks, so anything past about 20 MiB above the image is workable.  A
+ * machine with less fails later, with a clear message from whoever cannot
+ * get its memory, rather than here for no useful reason. */
+#define HEAP_MIN_RAM (24ULL * 1024ULL * 1024ULL)
 
 struct free_block {
     struct free_block *next;

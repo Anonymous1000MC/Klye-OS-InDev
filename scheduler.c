@@ -1,6 +1,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "heap.h"
 #include "kernel.h"
 #include "scheduler.h"
 
@@ -52,8 +53,10 @@ static void fpu_reset(uint8_t *area)
 }
 
 static struct task tasks[TASK_LIMIT];
-static uint8_t task_stacks[TASK_LIMIT][TASK_STACK_SIZE]
-    __attribute__((aligned(16)));
+/* Stacks come from the frame heap rather than BSS.  Six 128 KiB stacks was
+ * 768 KiB of static data, which is a lot of linker budget to spend on memory
+ * the kernel is not using until a task actually needs it. */
+static uint8_t *task_stacks[TASK_LIMIT];
 static int current_task_index = -1;
 
 int scheduler_current_task(void)
@@ -92,11 +95,20 @@ int task_spawn(task_function function, uint64_t argument)
 
     for (int index = 1; index < TASK_LIMIT; ++index) {
         struct task *task = &tasks[index];
-        uint64_t stack_top = (uint64_t)(uintptr_t)&task_stacks[index][TASK_STACK_SIZE];
+        uint64_t stack_top;
 
         if (task->ready) {
             continue;
         }
+        if (task_stacks[index] == 0) {
+            void *pages = heap_alloc_pages(TASK_STACK_SIZE);
+
+            if (pages == 0) {
+                panic("task: no memory for a stack");
+            }
+            task_stacks[index] = (uint8_t *)(uintptr_t)pages;
+        }
+        stack_top = (uint64_t)(uintptr_t)(task_stacks[index] + TASK_STACK_SIZE);
 
         task->registers = (struct interrupt_registers){0};
         task->frame = (struct cpu_frame){0};
