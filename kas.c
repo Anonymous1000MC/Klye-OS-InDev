@@ -486,6 +486,12 @@ static void kas_line(char *line)
         return;
     }
     if (def->has_arg == 1) {
+        /* matches the host assembler: reject rather than truncate, and
+         * reject negatives the same way it does */
+        if (index < 0 || index > 255) {
+            kas_fail("value does not fit in a byte");
+            return;
+        }
         kas_put8(index);
     } else if (def->has_arg == 3) {
         kas_put32(index);

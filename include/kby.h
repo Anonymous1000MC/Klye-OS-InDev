@@ -15,7 +15,12 @@
 #define KBY_KEYS 16
 #define KBY_WIN_MAX 4
 #define KBY_MAX_APPS 6
-#define KBY_BUDGET 2000000U
+/* Per-frame instruction cap.  This used to be 2,000,000, which was high
+ * enough that no program we tested could reach it, so it never actually
+ * bounded anything.  A frame that runs out of budget resumes at the same
+ * instruction next frame, so this needs to be comfortably above a normal
+ * frame while still stopping a runaway loop from wedging the compositor. */
+#define KBY_BUDGET 50000U
 #define KBY_NAME_MAX 32
 
 enum kby_opcode {
@@ -100,6 +105,7 @@ const char *kby_app_title(struct kby_app *app);
 const char *kby_error(struct kby_app *app);
 const char *kby_last_error(void);
 uint32_t kby_app_steps(struct kby_app *app);
+bool kby_app_starved(struct kby_app *app);
 int32_t kby_app_result(struct kby_app *app);
 bool kby_app_loaded(struct kby_app *app);
 

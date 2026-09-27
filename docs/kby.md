@@ -29,6 +29,13 @@ private locals, and there are 64 nested call frames.
 .nop
 .push8 N      .push32 N       .pushstr "s"
 .pop          .dup            .load I      .store I
+## Numeric ranges
+
+`.push8`, `.load` and `.store` take a single byte, so their operand must be
+0-255. Both assemblers reject anything outside that instead of truncating, so
+`.push8 20000` is an error rather than silently becoming 32. Use `.push32` for
+larger values.
+
 .add .sub .mul .div .mod .cmp
 .jmp L  .jz L  .jnz L  .call L  .ret  .halt  .num
 .print  .println

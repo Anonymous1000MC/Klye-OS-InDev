@@ -403,8 +403,25 @@ static void assemble_line(char *line)
         return;
     }
     if (def->has_arg == 1) {
+        /* Range check rather than silently truncating: put8() masked the
+         * value, so ".push8 20000" quietly became 32 and the program did
+         * something baffling instead of failing to assemble. */
+        char text[32];
+
+        snprintf(text, sizeof(text), "%ld", value);
+        if (value > 255) {
+            fail2("value %s does not fit in a byte for: %s", text, name);
+            return;
+        }
         put8((unsigned)value);
     } else if (def->has_arg == 3) {
+        if (value > 4294967295L) {
+            char text[32];
+
+            snprintf(text, sizeof(text), "%ld", value);
+            fail2("value %s does not fit in 32 bits for: %s", text, name);
+            return;
+        }
         put32((uint32_t)value);
     }
 }

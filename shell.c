@@ -1148,6 +1148,8 @@ static void cmd_kbyrun(char **tokens, int count)
     if (kby_error(app) != 0) {
         terminal_puts(", stopped: ");
         terminal_puts(kby_error(app));
+    } else if (kby_app_starved(app)) {
+        terminal_puts(", STARVED: hit the per-frame budget without reaching vsync");
     }
     terminal_puts("\n");
     kby_unload(app);

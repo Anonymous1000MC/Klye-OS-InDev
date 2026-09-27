@@ -41,6 +41,7 @@ struct kby_app {
     bool used;
     bool dead;
     bool halted;
+    bool starved;
     char name[KBY_NAME_MAX];
     char title[KBY_NAME_MAX];
     char error[64];
@@ -435,6 +436,11 @@ const char *kby_error(struct kby_app *app)
     return app->error;
 }
 
+bool kby_app_starved(struct kby_app *app)
+{
+    return app != 0 && app->starved;
+}
+
 uint32_t kby_app_steps(struct kby_app *app)
 {
     return app != 0 ? app->steps : 0U;
@@ -453,6 +459,7 @@ bool kby_run(struct kby_app *app, uint32_t budget)
         return false;
     }
     app->yielded = false;
+    app->starved = false;
     /* the string arena only backs transient encodings: draw commands copy
      * their text into the command itself, so it resets every frame */
     app->arena_used = 0;
@@ -1070,6 +1077,12 @@ bool kby_run(struct kby_app *app, uint32_t budget)
         if (app->yielded) {
             return true;
         }
+    }
+    /* ran out of budget: the program is still alive and resumes here next
+     * frame, but if it never reaches .vsync it will be cut at this same
+     * point forever, so say so rather than looking like it is just slow */
+    if (spent >= budget && !app->yielded && !app->dead && !app->halted) {
+        app->starved = true;
     }
     return true;
 }

@@ -1,12 +1,20 @@
 # Host tests
 
-`libc_test.c` links against the kernel's own `libc.c` and checks the parts
-that have no libc to compare against on the host. Run it with:
+`libc_test.c`, `math_test.c` and `float_test.c` link against the kernel's own
+`libc.c` and check the parts that have no libc to compare against on the host.
+Run all three with:
 
-    gcc -std=c11 -O1 -I../include -ffreestanding -c ../libc.c -o libc_test.o
-    gcc -std=c11 -O1 -c libc_test.c -o libctest.o
-    gcc libc_test.o libctest.o -o libctest -lm
-    ./libctest
+    ./tests/run.sh
+
+It exits nonzero if any check fails, so it is usable from a pre-commit hook.
+
+Compiling `libc.c` for the host is not as plain as it looks. `libc.c` is
+freestanding and defines `stdout`, `stderr`, `stdin`, `__errno_location` and
+the `__ctype_*_loc` tables, which also live inside glibc. Linked as-is it
+interposes on glibc's copies and every `printf` in the test binary segfaults,
+so `run.sh` renames those symbols in the object file with `objcopy`. The kernel
+still gets the names it expects; only the test build changes. `stubs.c` supplies
+the heap and timer entry points that `libc.c` now calls into.
 
 The printf expectations were taken from glibc so the kernel's hand written
 formatter stays compatible with what Lua expects.

@@ -1,11 +1,13 @@
 #include <stdio.h>
 extern int snprintf(char *b, unsigned long n, const char *f, ...);
+static int failures;
 static void chk(const char *fmt, double v, const char *want) {
     char b[128];
     snprintf(b, sizeof b, fmt, v);
-    if (__builtin_strcmp(b, want) != 0)
+    if (__builtin_strcmp(b, want) != 0) {
         printf("MISMATCH %-8s of %-10g got [%s] want [%s]\n", fmt, v, b, want);
-    else
+        ++failures;
+    } else
         printf("ok       %-8s of %-10g -> [%s]\n", fmt, v, b);
 }
 int main(void){
@@ -23,5 +25,8 @@ int main(void){
     chk("%f", 1.5, "1.500000");
     chk("%.3e", 1234.5, "1.234e+03");
     chk("%.1e", 0.000123, "1.2e-04");
-    return 0;
+    if (failures != 0) {
+        printf("%d float check(s) failed\n", failures);
+    }
+    return failures != 0;
 }
