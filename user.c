@@ -13,6 +13,7 @@
 
 #include "io.h"
 #include "mmu.h"
+#include "scheduler.h"
 #include "kernel.h"
 
 /* Selectors.  The ring 3 halves matter: a segment selector carries the ring
@@ -189,20 +190,29 @@ void user_report_frame(uint64_t entry, uint64_t stack, uint64_t code,
 
 bool user_run_test(void)
 {
-    uint64_t code;
-    uint64_t data;
     uint64_t entry;
     uint64_t stack;
+    int task;
 
     if (!user_load_test(&entry, &stack)) {
         return false;
     }
-    serial_write("  user: loaded at ");
+    /* A task, not an iretq from here.  Entering ring 3 on this stack and never
+     * coming back means the first tick after the program starts has nothing to
+     * switch back to, and the guest reboots. */
+    task = task_spawn_user(entry, stack);
+    if (task < 0) {
+        serial_write("  user: no free task slot\n");
+        return false;
+    }
+    serial_write("  user: started as task ");
+    serial_write_decimal((uint64_t)task);
+    serial_write(" at ");
     serial_write_decimal(entry);
     serial_write(" stack ");
     serial_write_decimal(stack);
     serial_putc('\n');
-    return user_spawn(entry, stack, &code, &data);
+    return true;
 }
 
 uint64_t user_syscall_count(void)

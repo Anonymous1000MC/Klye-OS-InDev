@@ -87,9 +87,61 @@ void scheduler_init(void *stack_pointer)
     current_task_index = 0;
 }
 
+/* A task that runs in ring 3.
+ *
+ * This is what the ring 3 test cannot do for itself.  Entering ring 3 from a
+ * shell command runs the program on the shell's own saved state, and there is
+ * no way back: the tick that arrives a millisecond later switches to another
+ * task, and when this one is next resumed its context describes a program that
+ * has already been somewhere else.  What the guest sees is a reboot, or a hang
+ * where the reboot would otherwise be -- both are the same defect, and neither
+ * is fixed by anything inside the program.
+ *
+ * So a user program gets a task of its own, with a stack it owns, and the
+ * scheduler resumes it like any other.  Two things have to be right for that to
+ * work.  The frame is an iretq frame, so the code and stack selectors carry the
+ * ring in their low two bits, and they are only ever handed back to iretq.  And
+ * the stack has to come from the user range rather than the kernel one: the
+ * pages the kernel uses are supervisor-only, and a ring 3 push onto one of them
+ * is a protection violation, so a stack allocated here could not be written.
+ */
+struct user_task_request {
+    uint64_t entry;
+    uint64_t stack;
+};
+
+static struct user_task_request user_requests[TASK_LIMIT];
+
+int task_spawn_user(uint64_t entry, uint64_t user_stack)
+{
+    if (user_stack == 0) {
+        return -1;
+    }
+    for (int index = 1; index < TASK_LIMIT; ++index) {
+        if (tasks[index].ready) {
+            continue;
+        }
+        /* The kernel stack is what a tick arriving from ring 3 is given, and it
+         * has to be a real one.  The program's own stack is the user range
+         * allocation the caller already made. */
+        if (task_stacks[index] == 0) {
+            void *pages = heap_alloc_pages(TASK_STACK_SIZE);
+
+            if (pages == 0) {
+                panic("user task: no memory for a kernel stack");
+            }
+            task_stacks[index] = (uint8_t *)(uintptr_t)pages;
+        }
+        user_requests[index].entry = entry;
+        user_requests[index].stack = user_stack;
+        return task_spawn(0, (uint64_t)index);
+    }
+    return -1;
+}
+
 int task_spawn(task_function function, uint64_t argument)
 {
-    if (function == 0) {
+    if (function == 0 && argument == 0) {
         return -1;
     }
 
@@ -113,14 +165,25 @@ int task_spawn(task_function function, uint64_t argument)
         task->registers = (struct interrupt_registers){0};
         task->frame = (struct cpu_frame){0};
         fpu_reset(task->fpu);
-        task->frame.rip = (uint64_t)(uintptr_t)task_trampoline_entry;
-        task->frame.cs = 0x08;
-        task->frame.rflags = 0x202;
-        task->frame.rsp = stack_top - 8;
-        task->frame.ss = 0x10;
-        *(uint64_t *)(uintptr_t)(stack_top - 8) = (uint64_t)index;
-        task->function = function;
-        task->argument = argument;
+        if (function == 0) {
+            /* a ring 3 task: enter the program directly, no trampoline */
+            task->frame.rip = user_requests[index].entry;
+            task->frame.cs = 0x23;   /* user code, ring 3 */
+            task->frame.rflags = 0x202;
+            task->frame.rsp = user_requests[index].stack;
+            task->frame.ss = 0x1B;    /* user data, ring 3 */
+            task->function = 0;
+            task->argument = 0;
+        } else {
+            task->frame.rip = (uint64_t)(uintptr_t)task_trampoline_entry;
+            task->frame.cs = 0x08;
+            task->frame.rflags = 0x202;
+            task->frame.rsp = stack_top - 8;
+            task->frame.ss = 0x10;
+            *(uint64_t *)(uintptr_t)(stack_top - 8) = (uint64_t)index;
+            task->function = function;
+            task->argument = argument;
+        }
         task->ready = true;
         return index;
     }
