@@ -1423,6 +1423,21 @@ static void cmd_vblkread(char **tokens, int count)
     if (rc != 0) {
         terminal_puts(": request failed, code ");
         shell_printf_u64((uint64_t)(-rc));
+        terminal_puts("\n    pfn ");
+        shell_printf_u64((uint64_t)device->queue[0].pfn);
+        terminal_puts("  physical ");
+        shell_printf_u64(device->physical);
+        terminal_puts("\n    desc0 ");
+        shell_printf_u64(device->queue[0].desc[0].address);
+        terminal_puts("  desc1 ");
+        shell_printf_u64(device->queue[0].desc[1].address);
+        terminal_puts("\n    avail ");
+        shell_printf_u64((uint64_t)device->queue[0].avail->index);
+        terminal_puts("  used ");
+        shell_printf_u64((uint64_t)device->queue[0].used->index);
+        terminal_puts("  status ");
+        shell_printf_u64((uint64_t)virtio_status(device));
+        terminal_puts("\n");
         return;
     }
     terminal_puts(" read back\n    first 32 bytes:");

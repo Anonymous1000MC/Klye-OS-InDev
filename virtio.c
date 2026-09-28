@@ -141,30 +141,31 @@ bool virtio_setup(struct virtio_device *d)
                  align4096(used_bytes);
     need = ring_bytes + sizeof(struct virtio_blk_request) +
            VIRTIO_BLK_SECTOR_BYTES;
-    base = heap_calloc(1, need + 4096U);
+    /* Taken from the mapping window, not the heap.
+     *
+     * The heap is in the high half, so a heap pointer is not a physical
+     * address: with 512 MiB of memory the page number has to be under 0x20000,
+     * and shifting a heap pointer right by twelve gives something several
+     * orders of magnitude larger.  Handing that to the device as a frame
+     * number is a frame it cannot read, and it answers by not answering at
+     * all, which looks exactly like a request it never saw.
+     *
+     * The window maps the same memory at a virtual address the CPU can reach
+     * and reports where it really is, which is the one address in this driver
+     * that is known rather than assumed. */
+    base = vm_alloc_pages(need);
     if (base == 0) {
         fail("out of memory for the queue rings");
         return false;
     }
-    /* rounded up to a page, because the device is given a page number and an
-     * unaligned one names a page that starts mid-page */
-    base = (uint8_t *)(((uintptr_t)base + 4095U) & ~(uintptr_t)4095U);
-    d->physical = (uint64_t)(uintptr_t)base;
+    d->physical = vm_to_physical((uint64_t)(uintptr_t)base);
     d->ring = (void *)base;
     d->ring_virtual = (uint64_t)(uintptr_t)base;
-    d->ring_bytes = (uint32_t)(need + 4096U);
+    d->ring_bytes = (uint32_t)need;
     d->request_offset = (uint32_t)ring_bytes;
     d->data_offset = (uint32_t)(ring_bytes +
                                 sizeof(struct virtio_blk_request));
 
-    /* The address handed to the device is the address the CPU writes through.
-     * That is only correct while the heap is identity mapped, and it is not:
-     * the heap sits in the high half, so a heap pointer is not a physical
-     * address.  Taking the rings from the mapping window and translating with
-     * vm_to_physical was tried, gave a plausible frame number, and the request
-     * still did not complete, so that is not trustworthy either.  This is the
-     * DMA capable mapping item, and it is a real blocker rather than a tidy
-     * one, and nothing here checks for it. */
     d->queue[0].desc = (struct virtio_desc *)base;
     d->queue[0].avail = (struct virtio_avail *)(base + align4096(desc_bytes));
     d->queue[0].used = (struct virtio_used *)(base + align4096(desc_bytes) +
