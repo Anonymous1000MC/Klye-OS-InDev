@@ -136,9 +136,15 @@ _start:
     or eax, (1 << 5) | (1 << 7)
     mov cr4, eax
 
+    ; EFER.  Bit 8 is LME, which the paging setup below depends on and which
+    ; was already being set here.  Bit 0 is SCE, the system call extension,
+    ; without which the SYSCALL instruction does not exist and a `syscall` in
+    ; ring 3 raises an invalid opcode with nothing in the report to say the
+    ; interrupt gate it aimed at was correct.  Both bits, because the first
+    ; alone leaves the machine unable to make a system call at all.
     mov ecx, 0xC0000080
     rdmsr
-    or eax, 1 << 8
+    or eax, (1 << 8) | (1 << 0)
     wrmsr
 
     mov eax, page_table_pml4

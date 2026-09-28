@@ -24,6 +24,18 @@ user_syscall_rip:
 .globl user_syscall_rflags
 user_syscall_rflags:
     .quad 0
+/* The user's stack pointer at the syscall instruction.
+ *
+ * It cannot be kept in rbp.  rbp is part of the register frame the handler is
+ * given, so the save and the restore are the user's own rbp, and by the time
+ * the return path runs, rbp holds whatever the program had rather than the
+ * stack it was on.  Restoring the stack pointer from that puts the program
+ * back on a stack pointer that was never its own, and the next instruction
+ * writes to an address below the bottom of the stack, which is mapped, so
+ * there is no fault to explain it: the program just stops. */
+.globl user_syscall_stack
+user_syscall_stack:
+    .quad 0
 
 /* The kernel stack a syscall runs on, at a fixed address so the stub can
  * reach it without needing any data of its own to find it. */
@@ -144,7 +156,7 @@ syscall_entry:
      * fault saying a privileged operation was attempted at user level.
      *
      * So the privilege level is raised here, by hand. */
-    movq %rsp, %rbp              /* the user's stack, parked for the return */
+    movq %rsp, user_syscall_stack(%rip)  /* the user's stack, for the return */
     movq %rcx, user_syscall_rip(%rip)    /* the return state the */
     movq %r11, user_syscall_rflags(%rip) /* instruction left in two registers */
     movq $syscall_kernel_stack_top, %rsp
@@ -165,16 +177,16 @@ syscall_entry:
     lretq
 
 syscall_in_kernel:
-    call serial_marker_ptr_in_kernel
-    /* The data selectors still point at the user's descriptors, and a ring 0
-     * process may not use a segment whose requested privilege is 3.  That is a
-     * general protection fault on the first memory write any handler makes, so
-     * they are replaced before anything else happens. */
-    movq $0x10, %rax              /* kernel data */
-    movq %rax, %ds
-    movq %rax, %es
-    movq %rax, %ss
-
+    /* The register save comes before anything that can use a register, and a
+     * call is exactly that: it is free to clobber rax, which is where the
+     * syscall number is, and free to clobber the rest.  The marker therefore
+     * has to go after the save and before the dispatch, and it can no longer
+     * be a call into C without saving again around it -- the trace is worth
+     * less than a correct frame. */
+    /* The register save has to come before anything that can use a register,
+     * and a call is exactly that: it is free to clobber rax, which is where
+     * the syscall number is, and free to clobber the rest.  The marker is
+     * below the save for that reason, not for tidiness. */
     /* the same three words the interrupt stub builds, in the same order, so
      * one dispatcher serves both.  The return address is this instruction,
      * which nothing returns through: a syscall goes back with sysretq. */
@@ -218,24 +230,56 @@ syscall_in_kernel:
     popq %r14
     popq %r15
     addq $16, %rsp                /* the error code and the vector */
+    /* The marker runs here, with the frame already consumed, so it is free to
+     * clobber every register.  It could not run any earlier: a call is free to
+     * destroy rax, and rax is the syscall number the handler is about to be
+     * given, which is how a write arrived as an unknown syscall 16. */
+    call serial_marker_ptr_in_kernel
     jmp syscall_return
 
 .globl syscall_return
 .type syscall_return, @function
 syscall_return:
+    /* The data selectors still point at the user's descriptors, and a ring 0
+     * process may not use a segment whose requested privilege is 3.  That is a
+     * general protection fault on the first memory write anything here makes,
+     * so they are replaced before the marker call, which is the first thing
+     * that would do one. */
+    movq $0x10, %rax              /* kernel data; rax is free, the frame is gone */
+    movq %rax, %ds
+    movq %rax, %es
     call serial_marker_ptr_return
+
     /* Hand the data selectors back before dropping privilege, so the program
      * does not find the kernel's descriptors loaded when it resumes.  A data
      * selector with a lower privilege than the current ring is legal, so
-     * leaving them would work, and would still be impolite. */
+     * leaving them would work, and would still be impolite.  SS is not set here:
+     * sysretq loads it, and it has to come from the same place as CS so the
+     * two cannot disagree. */
     movq $0x1B, %rax              /* 0x18 user data, ring 3 */
     movq %rax, %ds
     movq %rax, %es
-    movq %rbp, %rsp
+    movq user_syscall_stack(%rip), %rsp
     movq user_syscall_rip(%rip), %rcx
     movq user_syscall_rflags(%rip), %r11
-    movq $0x33, %rax              /* ring 0 data selector */
-    shlq $32, %rax
+    /* sysretq takes its return selectors from STAR by adding 16 and 8 to one
+     * field, and that field has to be a ring 0 selector for the syscall to
+     * have been able to enter at all.  So the selectors sysretq is about to
+     * load are the right descriptors at the wrong privilege: CS 0x20 and SS
+     * 0x18, both ring 0.  Loading those as a ring 3 program would fault on the
+     * first access, and a fault here has nowhere to be reported from.
+     *
+     * R11 has to arrive holding three fields, in this order from the top: the
+     * code selector in bits 63:48, the stack selector in 47:32, and the flags
+     * in the low half.  Building it by shifting the selectors into place in
+     * the wrong sequence is easy to do and fails quietly -- sysretq loads
+     * whatever lands in those fields, so a code selector of zero and a stack
+     * selector of 0x1B with the flags pushed up next to it return to address
+     * zero in ring 0, which looks like a program that simply stopped. */
+    movq $0x23, %rax
+    shlq $16, %rax
+    orq $0x1B, %rax
+    shlq $16, %rax
     orq %r11, %rax
     movq %rax, %r11
     sysretq

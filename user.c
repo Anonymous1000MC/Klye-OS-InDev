@@ -12,6 +12,7 @@
 #include "kernel.h"
 
 #include "io.h"
+#include "mmu.h"
 #include "kernel.h"
 
 /* Selectors.  The ring 3 halves matter: a segment selector carries the ring
@@ -122,6 +123,50 @@ void syscall_handler(struct interrupt_registers *regs, uint64_t number)
  * about it. */
 extern void user_test_entry(void);
 extern char user_test_stack_top[];
+extern char user_test_image_end[];
+
+#define USER_STACK_BYTES 8192U
+
+/* Load the test program into the user range and run it from there.
+ *
+ * It cannot run where the linker put it.  That address is in the kernel image,
+ * and the kernel image is mapped supervisor-only, so the processor refuses the
+ * first instruction fetch with a protection violation -- a page fault that is
+ * present on the page and still fails, which reads like a broken segment setup
+ * and is not one.  The program and its stack are copied into memory with the
+ * user bit set at every level of the walk, which is the only arrangement where
+ * ring 3 can reach it. */
+static bool user_load_test(uint64_t *entry, uint64_t *stack)
+{
+    uint64_t image_bytes = (uint64_t)(uintptr_t)user_test_image_end -
+                          (uint64_t)(uintptr_t)user_test_entry;
+    uint64_t image_pages = (image_bytes + VM_PAGE_BYTES - 1U) / VM_PAGE_BYTES;
+    void *image = vm_user_alloc_pages(image_pages * VM_PAGE_BYTES);
+    void *stacks;
+
+    if (image == 0) {
+        serial_write("  user: no memory for the program: ");
+        serial_write(vm_error());
+        serial_putc('\n');
+        return false;
+    }
+    stacks = vm_user_alloc_pages(USER_STACK_BYTES);
+    if (stacks == 0) {
+        serial_write("  user: no memory for the stack: ");
+        serial_write(vm_error());
+        serial_putc('\n');
+        vm_user_free_pages(image, image_pages * VM_PAGE_BYTES);
+        return false;
+    }
+    /* A ring 3 stack grows down, so the first push has to land inside the
+     * block rather than just below it.  Sixteen byte alignment is also what
+     * iretq wants to see, and an unaligned stack pointer there is a fault. */
+    *stack = ((uint64_t)(uintptr_t)stacks + USER_STACK_BYTES) & ~0xFULL;
+    __builtin_memcpy(image, (const void *)(uintptr_t)user_test_entry,
+                     (size_t)image_bytes);
+    *entry = (uint64_t)(uintptr_t)image;
+    return true;
+}
 
 /* The frame about to be given to iretq, printed before it is used.  A ring
  * change fails on a value in here and the processor reports nothing about
@@ -146,9 +191,18 @@ bool user_run_test(void)
 {
     uint64_t code;
     uint64_t data;
+    uint64_t entry;
+    uint64_t stack;
 
-    return user_spawn((uint64_t)(uintptr_t)user_test_entry,
-                      (uint64_t)(uintptr_t)user_test_stack_top, &code, &data);
+    if (!user_load_test(&entry, &stack)) {
+        return false;
+    }
+    serial_write("  user: loaded at ");
+    serial_write_decimal(entry);
+    serial_write(" stack ");
+    serial_write_decimal(stack);
+    serial_putc('\n');
+    return user_spawn(entry, stack, &code, &data);
 }
 
 uint64_t user_syscall_count(void)

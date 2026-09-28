@@ -112,9 +112,63 @@ extern uint64_t last_error_code;
 extern void *isr_table[32];
 extern void *irq_table[16];
 extern void isr255(void);
+extern void isr_syscall(void);
 
-static void set_idt_gate(uint8_t vector, void *handler, uint8_t type)
+static void msr_write(uint32_t msr, uint64_t value)
 {
+    uint32_t low = (uint32_t)value;
+    uint32_t high = (uint32_t)(value >> 32);
+
+    __asm__ volatile("wrmsr" : : "c"(msr), "a"(low), "d"(high) : "memory");
+}
+
+/* Program the three registers SYSCALL reads.
+ *
+ * The syscall instruction does not go through the interrupt descriptor table.
+ * It reads the entry point from IA32_LSTAR and the two selectors from IA32_STAR,
+ * which is why a gate installed at vector 0x80 changes nothing: that gate is
+ * what `int $0x80` uses, and the two are different instructions.  With these
+ * left at zero the processor jumps to address zero with a null code selector,
+ * and the result is an invalid opcode at address zero with cs 0, which names
+ * nothing about the real problem.
+ *
+ * STAR packs four selectors.  The top half supplies the ring 0 code and stack
+ * selectors for the far return, and the bottom half is the base that sysretq
+ * adds 8 and 16 to, so it has to be one below the ring 3 pair: 0x10 for a
+ * 0x18 user data and 0x20 for a 0x23 user code, added by the processor, not
+ * by us.  SFMASK is the set of flags cleared on entry, and the interrupt
+ * enable flag is the one that has to be: the handler runs on a kernel stack
+ * with no task of its own, so a tick landing in the middle of it would arrive
+ * with the user's stack pointer and the machine's idea of the task still
+ * describing ring 3. */
+static void syscall_msr_init(void)
+{
+    /* STAR packs four selectors, and two of them want different things: the
+     * syscall instruction loads its stack selector from the top half, where a
+     * ring 0 value is required, while sysretq computes its return selectors by
+     * adding 16 and 8 to that same field, where a ring 3 value is required.
+     * They cannot both be satisfied, and entry has to win: a stack selector
+     * that is too privileged to load raises a general protection fault on the
+     * way in, which no amount of correct code afterwards can recover from.
+     *
+     * So the field is 0x10, the ring 0 data selector.  Entering works.  On the
+     * way out sysretq would load CS 0x20 and SS 0x18, both of which are the
+     * right descriptors at the wrong privilege, and the return path therefore
+     * has to put the ring 3 pair in place itself rather than trust these. */
+    uint64_t star = ((uint64_t)0x10U << 48) |   /* ring 0 data, for the syscall entry */
+                    ((uint64_t)0x08U << 32) |   /* ring 0 code, for the syscall far return */
+                    ((uint64_t)0x10U << 16) |   /* unused by SYSCALL; kept for symmetry */
+                    (uint64_t)0x10U;
+
+    msr_write(0xC0000081U, star);                    /* STAR */
+    msr_write(0xC0000082U, (uint64_t)(uintptr_t)isr_syscall); /* LSTAR */
+    msr_write(0xC0000084U, 0x200U);                  /* SFMASK: clear IF */
+    /* EFER is deliberately not written here.  SCE is set in boot.asm, where
+     * long mode is entered, because SYSCALL is undefined until it is and the
+     * failure looks like a bad gate rather than a missing feature bit. */
+}
+
+static void set_idt_gate(uint8_t vector, void *handler, uint8_t type){
     uint64_t address = (uint64_t)(uintptr_t)handler;
 
     idt[vector].offset_low = (uint16_t)(address & 0xFFFF);
@@ -304,6 +358,18 @@ void idt_init(void)
         set_idt_gate((uint8_t)(32U + irq), irq_table[irq], 0x8E);
     }
     set_idt_gate(255, isr255, 0x8E);
+    /* The syscall gate, and the low two bits of its type byte are the privilege
+     * level it offers: 3 here, so ring 3 may call through it.  The exception
+     * gates above are all DPL 0, and a `syscall` aimed at one of those is
+     * refused with a general protection fault rather than being carried out.
+     * Without this gate the vector is simply zero, and the instruction raises
+     * an invalid opcode instead. */
+    /* Both spellings of a system call are set up.  The gate is what `int $0x80`
+     * uses; the MSRs are what the `syscall` instruction uses, and they are not
+     * the same mechanism, so a program may use either and a Linux binary will
+     * use the second. */
+    set_idt_gate(0x80U, (void *)(uintptr_t)isr_syscall, 0xEEU);
+    syscall_msr_init();
 
     idt_pointer_value.limit = sizeof(idt) - 1;
     idt_pointer_value.base = (uint64_t)(uintptr_t)idt;

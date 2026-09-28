@@ -30,6 +30,17 @@ bool vm_init(void);
  * frames or the tables are unavailable.  Zero filled. */
 void *vm_alloc_pages(size_t bytes);
 
+/* The same, but the result is reachable from ring 3.
+ *
+ * The user bit has to be set on the tables above the leaf as well as on the
+ * leaf, and the tables over the kernel's mappings are shared with the kernel, so
+ * user memory cannot be a range inside the window vm_alloc_pages hands out.  It
+ * gets its own top level slot instead, and everything in the walk down from
+ * there is created user-accessible.  Returns a virtual address in that range,
+ * or 0. */
+void *vm_user_alloc_pages(size_t bytes);
+void vm_user_free_pages(void *address, size_t bytes);
+
 /* Map a range of physical addresses into the mapping window, without taking
  * frames for it, and release it again.  For hardware: a PCI base address
  * register names a place in the machine's physical address space that the CPU
@@ -44,6 +55,10 @@ void vm_free_pages(void *address, size_t bytes);
  * aligned.  Used by vm_alloc_pages; exposed for callers driving the tables
  * themselves. */
 bool vm_map_page(uint64_t virtual_address, uint64_t physical_address);
+
+/* Map one 4 KiB physical page so that ring 3 can reach it, building the tables
+ * above it with the user bit set.  See vm_user_alloc_pages. */
+bool vm_map_user_page(uint64_t virtual_address, uint64_t physical_address);
 
 /* Drop the mapping at a 4 KiB aligned virtual address. */
 void vm_unmap_page(uint64_t virtual_address);

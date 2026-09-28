@@ -84,6 +84,22 @@ ISR_NO_ERROR 46
 ISR_NO_ERROR 47
 ISR_NO_ERROR 255
 
+/* The syscall entry, vector 0x80.
+ *
+ * Separate from isr_common on purpose.  A gate has to offer ring 3 the
+ * privilege it is reached at, and the exception gates deliberately do not: they
+ * are DPL 0, so ring 3 is refused with a general protection fault.  This one
+ * carries DPL 3 in the low two bits of its type byte.
+ *
+ * It also does not go through the interrupt path.  A syscall is a call, and
+ * the frame it has to leave behind is the one ring3.S's own stub builds, with
+ * the register save and the return to user mode done in assembly where the
+ * exact stack layout is known. */
+.global isr_syscall
+.type isr_syscall, @function
+isr_syscall:
+    jmp syscall_entry
+
 isr_common:
     pushq %r15
     pushq %r14
