@@ -1375,6 +1375,76 @@ static int shell_pad_text(char *out, const char *text, int width)
     return at;
 }
 
+/* "vblkread" reads one sector through the virtio queue.
+ *
+ * The point of this command is the comparison, not the reading.  The same
+ * sector can be read with ataread, which goes out on the legacy PIO path and
+ * has been working, so a virtio result has something to be checked against
+ * rather than merely looked at. */
+static void cmd_vblkread(char **tokens, int count)
+{
+    static uint8_t sector[512];
+    struct virtio_device *device;
+    uint64_t lba = 0U;
+    int rc;
+
+    if (count < 2) {
+        terminal_puts("vblkread: usage: vblkread <lba>\n");
+        return;
+    }
+    for (int at = 0; tokens[1][at] != 0; ++at) {
+        if (tokens[1][at] < '0' || tokens[1][at] > '9') {
+            terminal_puts("vblkread: not a number\n");
+            return;
+        }
+        lba = lba * 10U + (uint64_t)(tokens[1][at] - '0');
+    }
+    device = virtio_find(1U);
+    if (device == 0) {
+        terminal_puts("vblkread: no virtio block device\n");
+        return;
+    }
+    /* Set up only if something has not already.  Setting up writes zero to the
+     * status register, which resets the device and throws away the queue it
+     * was given, so doing it again before every request would undo the last
+     * one. */
+    if (device->ready == false && virtio_setup(device) == false) {
+        terminal_puts("vblkread: setup failed: ");
+        terminal_puts(virtio_error());
+        terminal_puts("\n");
+        return;
+    }
+    for (int at = 0; at < 512; ++at) {
+        sector[at] = 0;
+    }
+    rc = virtio_blk_read(device, lba, sector);
+    terminal_puts("  virtio sector ");
+    shell_printf_u64(lba);
+    if (rc != 0) {
+        terminal_puts(": request failed, code ");
+        shell_printf_u64((uint64_t)(-rc));
+        return;
+    }
+    terminal_puts(" read back\n    first 32 bytes:");
+    for (int at = 0; at < 32; ++at) {
+        char pair[3];
+
+        pair[0] = "0123456789abcdef"[sector[at] >> 4];
+        pair[1] = "0123456789abcdef"[sector[at] & 0xFU];
+        pair[2] = 0;
+        if ((at % 8) == 0) {
+            terminal_puts("\n     ");
+        }
+        terminal_puts(pair);
+        terminal_puts(" ");
+    }
+    terminal_puts("\n    used ");
+    shell_printf_u64((uint64_t)virtio_queue_used(device, 0));
+    terminal_puts("  free ");
+    shell_printf_u64((uint64_t)virtio_queue_free(device, 0));
+    terminal_puts("\n");
+}
+
 /* "virtio" finds a virtio device, maps it and sets up its queues, then
  * prints what was negotiated.  The transport only: no data has moved through
  * the queue yet, so the numbers here are what the device offered and what this
@@ -1391,8 +1461,7 @@ static void cmd_virtio(void)
     }
     pci = device->pci;
     terminal_puts("  virtio block device\n");
-    terminal_puts("    interface  ");
-    terminal_puts(device->modern ? "modern (memory)\n" : "legacy (ports)\n");
+    terminal_puts("    interface  legacy port register\n");
     terminal_puts("    vendor  1af4  device  ");
     shell_printf_hex_line(device->device_id);
     terminal_puts("\n");
@@ -1400,7 +1469,10 @@ static void cmd_virtio(void)
     if (virtio_setup(device) == false) {
         terminal_puts("    setup failed: ");
         terminal_puts(virtio_error());
-        terminal_puts("\n");
+        terminal_puts("\n    num_queues  ");
+        shell_printf_u64((uint64_t)device->num_queues_reported);
+        terminal_puts("  select readback  ");
+        shell_printf_u64((uint64_t)device->select_readback);
         return;
     }
     terminal_puts("    device features  0x");
@@ -1562,11 +1634,11 @@ static void cmd_history(void)
 static void cmd_banner(void)
 {
     terminal_puts("\n");
-    terminal_puts("  ###  #    # #### #  # ######  ####  \n");
-    terminal_puts("  #   # #    # #   # # # #   # #   # \n");
-    terminal_puts("  ####  #    # #### # # #   # ####  \n");
-    terminal_puts("  #   # #    # #   # # #   # #   # \n");
-    terminal_puts("  #   #  ####  ####  # ######  #    \n");
+    terminal_puts("  #   #  #    #   #  #####  #####  #####  \n");
+    terminal_puts("  #  #   #     # #   #      #   #  #      \n");
+    terminal_puts("  ####   #     #    ####    #   #  #####  \n");
+    terminal_puts("  #  #   #     #    #       #   #      #  \n");
+    terminal_puts("  #   #  #####   #    #####   #####  #####  \n");
     terminal_puts("\n");
 }
 
@@ -2757,6 +2829,8 @@ void shell_execute(const char *line)
         cmd_ata();
     } else if (text_equal(tokens[0], "virtio")) {
         cmd_virtio();
+    } else if (text_equal(tokens[0], "vblkread")) {
+        cmd_vblkread(tokens, count);
     } else if (text_equal(tokens[0], "pci")) {
         cmd_pci(tokens, count);
     } else if (text_equal(tokens[0], "ataread")) {

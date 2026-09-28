@@ -95,7 +95,7 @@ class Qmp:
 
 class Guest:
     def __init__(self, tag, iso=ISO, mem='512M', port=4444, disk=None,
-                 extra=()):
+                 extra=(), use_cdrom=True):
         self.tag = tag
         self.log_path = '/tmp/opencode/%s.log' % tag
         self.gdb_path = '127.0.0.1:%d' % port
@@ -105,17 +105,29 @@ class Guest:
                 os.unlink(path)
         disk = disk or DISK_IMAGE
         self.disk_path = disk
+        # the ISO can be handed over as a virtio block device instead of a
+        # CD, which is how a virtio guest is normally built: the firmware
+        # boots it through the device driver, so if virtio does not work the
+        # machine does not start at all rather than booting and failing later
+        if not use_cdrom:
+            args = [
+                '-drive', 'file=%s,if=none,id=live_disk,format=raw,readonly=on' % iso,
+                '-device', 'virtio-blk-pci,drive=live_disk,bootindex=1',
+            ]
+        else:
+            args = [
+                '-cdrom', iso,
+                '-drive', 'file=%s,format=raw,if=ide,index=0,media=disk' % disk,
+            ]
         self.proc = subprocess.Popen([
-            'qemu-system-x86_64',
-            '-cdrom', iso,
-            '-drive', 'file=%s,format=raw,if=ide,index=0,media=disk' % disk,
+            'qemu-system-x86_64'] + args + [
             # Boot the CD, not the disk.  A FAT volume carries the 0x55AA boot
             # signature, so SeaBIOS treats it as bootable, jumps to sector 0,
             # and spins forever in the non-bootable code mkfs.fat leaves
             # there: no serial output at all, and the CPU parked below the
             # kernel.  The old flat image had no signature, so the disk was
             # skipped and this never showed up.
-            '-boot', 'order=d',
+            ] + (['-boot', 'order=d'] if use_cdrom else []) + [
             '-m', mem,
             '-serial', 'file:%s' % self.log_path,
             '-display', 'none',

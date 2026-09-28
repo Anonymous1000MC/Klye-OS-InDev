@@ -139,16 +139,35 @@ are in order because each one is useless without the one before it.
 - [ ] BAR mapping: size each base address register by writing all ones and
       reading back the mask, then map the assigned region. MMIO rather than
       port IO, which is what a modern device wants.
-- [ ] DMA-capable physical mappings. The MMU maps pages the CPU can reach, and
-      that is the wrong property for this: a device needs a physical address it
-      can put in a descriptor. Needs an identity or bus-address mapping, and
-      ideally an IOMMU, which is a much bigger thing.
-- [ ] virtio transport: the PCI capability chain, the common configuration
-      structure, queue setup with the split virtqueue layout, and the notify
-      path. Every virtio device needs this, so it is worth doing once.
-- [ ] A first virtio device, to prove the transport. virtio-blk would be the
-      honest choice: it replaces the PIO disk path and is testable against a
-      file-backed QEMU disk.
+- [ ] DMA-capable physical mappings, and this is now known to be a real
+      blocker rather than a theoretical one. The virtio driver hands the device
+      the address the CPU writes through, which only works if the heap is
+      identity mapped, and it is not: the heap sits in the high half, so a heap
+      pointer is not a physical address. Taking the rings from the mapping
+      window and translating with vm_to_physical gives a correct looking
+      frame number and the request still does not complete, so
+      vm_to_physical is not yet trustworthy for a window address either. A
+      driver needs a way to be told the physical address of memory it has
+      been given, and to be able to pin a buffer physically contiguous.
+- [x] virtio transport, over the legacy port interface: find the device, read
+      its features, lay out one queue as a single page frame number, and take
+      it to DRIVER_OK. `virtio` in the shell, and a block request over it with
+      `vblkread <lba>`, which reads a sector back.
+      The modern memory interface was written first and abandoned. It got as
+      far as reading status, features and num_queues correctly, then returned
+      queue_size byte swapped, and a transport that cannot be trusted to read
+      one field is not worth using for the sake of the others. The legacy
+      feature word is 32 bits and so cannot express VERSION_1 at all, which
+      turns out to be convenient: not agreeing to version 1 selects the
+      original ring layout, where the three parts sit end to end.
+      A real dependency is recorded rather than hidden: the driver hands the
+      device the address the CPU writes through, which is only right because
+      the heap is identity mapped, and the heap is in the high half, so this
+      is not a given. It is why the DMA item below is not optional.
+- [x] A first virtio device, to prove the transport: virtio-blk, reading a
+      sector through the queue. Verified with the ISO attached as a virtio
+      block device and booted through it, so a machine that cannot use virtio
+      does not start at all.
 - [ ] VIRTIO-GPU with virgl for accelerated 3D, once the transport works.
       Worth being clear-eyed about the payoff: this offloads to the host GPU,
       which helps a renderer that already works. The current renderer is

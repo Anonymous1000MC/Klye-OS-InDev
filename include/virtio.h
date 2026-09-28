@@ -17,15 +17,22 @@
  * block, negotiate features, and lay out one queue.  Driving a request
  * through the queue is the next step, and needs a driver on top.
  *
- * The modern PCI interface is used, not the legacy one.  A modern device
- * publishes a structure in memory rather than a set of registers, which is
- * both less work and the one that does not have a byte-ordering story.
+ * The legacy transport is used, through the device's port register.  A
+ * transitional device, which is what QEMU presents by default as device id
+ * 0x1001, has both, and the legacy one is a handful of registers at fixed
+ * offsets: four words of features, four words of ring addresses, a queue size
+ * and a status byte.  The modern interface puts a structure in memory instead,
+ * which is the more modern arrangement and was tried first; on this device its
+ * queue size read back byte swapped, and a transport that cannot be trusted to
+ * read one field is not worth using for the sake of the others.
  *
- * The rings are physically contiguous, so they come from the heap and their
- * addresses are used directly.  That is only true because boot code identity
- * maps the low memory, which is noted in the source rather than assumed
- * quietly: a driver that needs arbitrary buffers later will have to scatter
- * them, and the queue layout here is what that has to fit into.
+ * The rings are physically contiguous and page aligned, because the legacy
+ * interface is told where the queue is as a single page frame number and
+ * works out the rest itself.  They come from the heap, over-allocated so the
+ * address can be rounded up to a page.  That only works because boot code
+ * identity maps the low memory, which is noted in the source rather than
+ * assumed quietly: a driver that needs an arbitrary buffer later will have to
+ * scatter it, and this layout is what has to accommodate that.
  */
 
 #define VIRTIO_VENDOR 0x1AF4U
@@ -83,14 +90,32 @@ struct virtio_queue {
     struct virtio_used *used;
     uint32_t next_free;
     uint16_t last_used;
+    uint32_t pfn;
+    uint64_t physical;   /* where it is in the machine, not in the window */
     bool ready;
 };
 
+/* The block request a virtio disk expects in front of every transfer.  The
+ * first field is read by the device and read by the driver, so it cannot be
+ * reordered around the rest of the structure. */
+struct virtio_blk_request {
+    volatile uint32_t type;   /* 0 in, 1 out */
+    uint32_t reserved;
+    uint64_t sector;
+};
+
+#define VIRTIO_BLK_IN 0U
+#define VIRTIO_BLK_SECTOR_BYTES 512U
+
 struct virtio_device {
     const struct pci_device *pci;
-    volatile uint8_t *common;    /* the common configuration block */
-    volatile uint8_t *notify;    /* the notification area */
-    uint32_t notify_offset_multiplier;
+    uint16_t io;                  /* the legacy port register base */
+    struct virtio_blk_request request;
+    uint64_t ring_virtual;   /* the window allocation, as the CPU sees it */
+    uint64_t physical;       /* and where that is in the machine */
+    uint32_t data_offset;    /* and the data buffer's */  /* the header in front of a transfer */
+    uint32_t ring_bytes;          /* the contiguous ring allocation */
+    void *ring;
     uint64_t device_features;   /* 64 features, in two 32 bit words */
     uint64_t driver_features;
     uint16_t queue_count;
@@ -98,6 +123,14 @@ struct virtio_device {
     bool ready;
     bool modern;
     uint16_t device_id;
+    uint16_t num_queues_reported;   /* as the device says, even after a failure */
+    uint16_t select_readback;
+    uint32_t pfn;            /* the frame number handed to the device */
+    uint8_t last_isr;
+    uint16_t last_queue_size;
+    uint8_t last_status;        /* after a failed request, for working out why */
+    uint16_t last_used_index;
+    uint16_t last_avail_index;
 };
 
 /* Find a virtio device by its PCI device id, or 0.  A modern device is
@@ -113,12 +146,35 @@ bool virtio_setup(struct virtio_device *device);
  * has got: acknowledge, driver, features ok, driver ok. */
 uint8_t virtio_status(const struct virtio_device *device);
 
+/* A 32 bit read of the common configuration block, for working out what a
+ * device is actually answering. */
+uint32_t virtio_common_read(const struct virtio_device *device, uint16_t offset);
+
+/* Read one sector through the queue and leave it in `buffer`.
+ *
+ * Two descriptors, chained: the request header first, then the data.  The
+ * device is told the queue has work by a write to its notify register, and
+ * then everything depends on polling the used ring, because there is no
+ * interrupt wired up yet.  Returns 0 on success, or a negative number. */
+int virtio_blk_read(struct virtio_device *device, uint64_t sector,
+                    uint8_t *buffer);
+
 /* Progress reported by the device, for the shell. */
 int virtio_queue_free(const struct virtio_device *device, int index);
 int virtio_queue_used(const struct virtio_device *device, int index);
 
 /* Tell the device a queue has work in it. */
 void virtio_notify(struct virtio_device *device, int queue);
+
+/* Legacy register offsets, in port space. */
+#define VIRTIO_LEGACY_FEATURES 0x00
+#define VIRTIO_LEGACY_GUEST_FEATURES 0x04
+#define VIRTIO_LEGACY_QUEUE_PFN 0x08
+#define VIRTIO_LEGACY_QUEUE_SIZE 0x0C
+#define VIRTIO_LEGACY_QUEUE_SELECT 0x0E
+#define VIRTIO_LEGACY_QUEUE_NOTIFY 0x10
+#define VIRTIO_LEGACY_STATUS 0x12
+#define VIRTIO_LEGACY_ISR 0x13
 
 /* Reason for the most recent failure, or "" if none. */
 const char *virtio_error(void);
