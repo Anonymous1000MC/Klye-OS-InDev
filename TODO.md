@@ -19,6 +19,30 @@ Ordered so each blocker sits above whatever depends on it.
 - [x] Five float formatting bugs, found by a differential test against glibc
 - [x] The qemu harness reading terminal text back correctly
 
+## Doom format notes, so the archaeology is not repeated
+
+Three layouts have been identified in DOOM1.WAD, and all three differ from what
+a vanilla-format reading would give. Checked against the real file, not assumed.
+
+- **Full screen pictures** are flat, not post encoded. Every column is the same
+  length with the pixels at a fixed offset of 2: TITLEPIC is 320x200 with a
+  stride of 209, and 320 * 209 accounts for the lump exactly. Reading one as
+  posts overruns the column and paints 289 rows.
+- **Sprites** are post encoded with varying column stride, and the length byte
+  does not match the number of pixels that follow. A k+2 fudge renders a
+  recognisable but stretched Doomguy. Unresolved, and it gates sprites, the
+  status bar face, and the title animation.
+- **TEXTURE1 is offset indexed**: a 125 entry table of uint32 follows the count,
+  where vanilla walks the textures inline. Each entry lands on a sane
+  definition, AASTINKY at 24x72 with 2 patches, BIGDOOR1 at 128x96 with 5.
+- **The texture definition header is 18 bytes** in this file, not the 24 of
+  vanilla: name[8], masked[4], width[2], height[2], npatches[2], with no
+  columndirectory and no trailing pad. That is confirmed by the offsets: the
+  next texture begins exactly 18 + 12 * npatches bytes later. But the column
+  directory would then start at the same place the next texture's name sits,
+  so where it actually lives is still unresolved. This is the blocker for
+  texture lookup and therefore for the 3D view.
+
 ## Next
 
 - [x] Skip repainting a script that drew the same thing again: a static window
