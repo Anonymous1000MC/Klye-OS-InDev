@@ -36,6 +36,10 @@ user_syscall_rflags:
 .globl user_syscall_stack
 user_syscall_stack:
     .quad 0
+/* Trace only: the packed selectors and flags, for serial_trace_sysret. */
+.globl user_syscall_r11
+user_syscall_r11:
+    .quad 0
 
 /* The kernel stack a syscall runs on, at a fixed address so the stub can
  * reach it without needing any data of its own to find it. */
@@ -229,11 +233,7 @@ syscall_in_kernel:
     popq %r13
     popq %r14
     popq %r15
-    addq $16, %rsp                /* the error code and the vector */
-    /* The marker runs here, with the frame already consumed, so it is free to
-     * clobber every register.  It could not run any earlier: a call is free to
-     * destroy rax, and rax is the syscall number the handler is about to be
-     * given, which is how a write arrived as an unknown syscall 16. */
+    addq $24, %rsp                /* the error code, the vector, the return address */
     call serial_marker_ptr_in_kernel
     jmp syscall_return
 
@@ -249,6 +249,7 @@ syscall_return:
     movq %rax, %ds
     movq %rax, %es
     call serial_marker_ptr_return
+    call serial_trace_a
 
     /* Hand the data selectors back before dropping privilege, so the program
      * does not find the kernel's descriptors loaded when it resumes.  A data
@@ -259,9 +260,22 @@ syscall_return:
     movq $0x1B, %rax              /* 0x18 user data, ring 3 */
     movq %rax, %ds
     movq %rax, %es
-    movq user_syscall_stack(%rip), %rsp
+    /* Read every value out of memory before %rsp is pointed at the user's
+     * stack.  Loading that stack pointer and then calling anything pushes the
+     * return address onto it, and a push there is a write into the page above
+     * the allocation: mapped, so no fault, and quietly wrong. */
+    movq user_syscall_stack(%rip), %rbx
     movq user_syscall_rip(%rip), %rcx
     movq user_syscall_rflags(%rip), %r11
+    /* Write the port directly: a C call here has to be trusted to survive
+     * whatever %rsp and the selectors are holding, and if it does not the
+     * only evidence is the absence of a line. */
+    movw $0x3F8, %dx
+    movb $0x2A, %al
+    outb %al, %dx
+    movb $0x0A, %al
+    outb %al, %dx
+    movq %rbx, %rsp
     /* sysretq takes its return selectors from STAR by adding 16 and 8 to one
      * field, and that field has to be a ring 0 selector for the syscall to
      * have been able to enter at all.  So the selectors sysretq is about to
@@ -282,4 +296,10 @@ syscall_return:
     shlq $16, %rax
     orq %r11, %rax
     movq %rax, %r11
+    /* TRACE: stash r11 so the tracer can read it, then restore rcx, which the
+     * call is free to destroy. */
+    movq %r11, user_syscall_r11(%rip)
+    movq %rcx, %rdi
+    call serial_trace_sysret
+    movq user_syscall_rip(%rip), %rcx
     sysretq
