@@ -117,6 +117,9 @@ struct wm_state {
     uint64_t heartbeat[APP_COUNT];
     uint32_t chrome_dirty;
     uint32_t composite_count;
+    /* how many window repaints were narrowed to a rectangle, for the shell
+     * counters; the rest fell back to the whole window */
+    uint32_t damage_rect_count;
     uint32_t ready;
 };
 
@@ -422,16 +425,32 @@ static void mark_chrome_dirty(void)
     wm.chrome_dirty = 1U;
 }
 
+/* Mark a window as needing a repaint.
+ *
+ * A script that changed only part of itself says which part, so the damage is
+ * that rectangle rather than the window.  The shadow is still included, since
+ * a window's edge is part of the same chrome and the shadow is drawn outside
+ * the content.  Anything that cannot say, falls back to the whole window,
+ * which is what this always did.
+ */
 static void damage_window(int index)
 {
     struct wm_window *window = &wm.windows[index];
     int spread = THEME_WINDOW_SHADOW_SPREAD;
+    struct gfx_rect part;
 
     if (window->used == 0) {
         return;
     }
     wm.composite_count++;
     window->content_dirty = 0;
+    if (window->lua >= 0 &&
+        lua_host_damage_rect(lua_host_at(window->lua), &part)) {
+        gfx_damage(window->x + part.x - spread, window->y + part.y - spread,
+                   part.width + spread * 2, part.height + spread * 2);
+        wm.damage_rect_count++;
+        return;
+    }
     gfx_damage(window->x - spread, window->y - spread,
                window->width + spread * 2, window->height + spread * 2);
 }
@@ -2433,6 +2452,7 @@ static void refresh_chrome(void)
     wm.present_count = 0;
     wm.fps = 0;
     wm.composite_count = 0;
+    wm.damage_rect_count = 0;
     wm.chrome_dirty = 1U;
     wm.mouse_buttons = 0;
     wm.press_x = 0;

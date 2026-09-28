@@ -40,6 +40,12 @@ void lua_host_service(struct lua_host *host);
 /* True when the last service produced a different display list than the one
  * before it, meaning the window genuinely needs repainting. */
 bool lua_host_list_changed(const struct lua_host *host);
+
+/* The bounding box of what the script changed since the last frame, in window
+ * coordinates, or false when there is none and the whole window has to be
+ * repainted.  This is a bound on where pixels can differ, so it must never be
+ * smaller than the commands it came from. */
+bool lua_host_damage_rect(const struct lua_host *host, struct gfx_rect *out);
 void lua_host_draw(struct lua_host *host, struct gfx_surface *surface, int x,
                    int y, int width, int height);
 

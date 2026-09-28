@@ -51,18 +51,17 @@ a vanilla-format reading would give. Checked against the real file, not assumed.
 - [x] FAT16 on the ATA disk: real directories, long filenames, read and write
 - [x] A boot order fix, without which a real filesystem on the disk stopped the
       kernel booting at all
-- [ ] Damage only the bounding box of what a script changed, rather than the
-      whole window, and a wide-copy present path.
-      Half done and uncommitted: the host already diffs the display list to
-      decide whether anything changed, and that diff now also unions the
-      rectangles of the commands that differ, so the damage can be that box
-      rather than the window. Text is measured with the font rather than
-      estimated, because a box that is too small leaves stale pixels and
-      nothing downstream would notice. The clock narrows 676 of 690 repaints
-      this way. The wide-copy present path is already there: gfx_present uses
-      a per-row memcpy, which is what that item was really asking for. Still
-      to do: check for visual artifacts, and measure rows presented, which is
-      the number that says whether this is worth anything.
+- [x] Damage only the bounding box of what a script changed, rather than the
+      whole window, and a wide-copy present path. The host already diffed the
+      display list to decide whether anything changed; that diff now also
+      unions the rectangles of the commands that differ, and the window
+      manager damages that box instead of the window. Text is measured with the
+      font rather than estimated, because a box that is too small leaves stale
+      pixels and nothing downstream would notice. A clock narrowed 655 of 669
+      repaints, and rows copied per present fell from 424 to 78 out of 720,
+      measured by rebuilding the old behaviour and comparing. The wide-copy
+      present path was already there: gfx_present uses a per-row memcpy, which
+      is what that half of the item was really asking for.
 - [x] FAT16 mounted on the ATA disk: directories, long filenames, read and
       write, so files have real paths
 - [x] Larger VFS capacity: 4 MiB across 8192 blocks, 512 nodes and 256 KiB per

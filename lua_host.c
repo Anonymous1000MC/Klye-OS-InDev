@@ -14,6 +14,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "apps.h"
 #include "font.h"
@@ -64,6 +65,11 @@ struct lua_host {
     struct lua_draw previous[LUA_DRAW_MAX];
     int previous_count;
     bool list_changed;
+    /* The bounding box of the commands that differed from last frame, so the
+     * compositor repaints that rather than the whole window.  Window
+     * coordinates, and only valid while has_damage_rect is set. */
+    struct gfx_rect damage_rect;
+    bool has_damage_rect;
     int mouse_x;
     int mouse_y;
     bool mouse_down;
@@ -90,6 +96,63 @@ static struct lua_host hosts[LUA_HOST_LIMIT];
 static void draw_push(struct lua_host *host, uint8_t op, int32_t a, int32_t b,
                       int32_t c, int32_t d, int32_t radius, uint32_t colour,
                       const char *text);
+
+/* The rectangle one display list command covers, in window coordinates.
+ *
+ * Every op has to answer this exactly.  A rectangle that is too small leaves
+ * stale pixels on screen and nothing downstream would notice, because the
+ * damage region and the redraw come from the same wrong number.  Text is
+ * measured with the font rather than estimated, and the two ops whose extent
+ * this cannot know cheaply, a scaled picture and the 3D view, decline and force
+ * the whole window, which is what the old code always did. */
+static bool draw_bounds(const struct lua_draw *cmd, int *x, int *y, int *width,
+                        int *height)
+{
+    int patch_w;
+    int patch_h;
+
+    switch (cmd->op) {
+    case 1: /* fill */
+    case 2: /* rounded rect */
+        *x = cmd->a;
+        *y = cmd->b;
+        *width = cmd->c;
+        *height = cmd->d;
+        return cmd->c > 0 && cmd->d > 0;
+    case 3: /* text */
+        *x = cmd->a;
+        *y = cmd->b;
+        *width = font_text_width(cmd->text, 1);
+        *height = font_line_height(1);
+        return cmd->text[0] != 0;
+    case 4: /* circle, `c` is the radius */
+        *x = cmd->a - cmd->c;
+        *y = cmd->b - cmd->c;
+        *width = cmd->c * 2;
+        *height = cmd->c * 2;
+        return cmd->c > 0;
+    case 5: /* horizontal line, `c` is the length */
+        *x = cmd->a;
+        *y = cmd->b;
+        *width = cmd->c;
+        *height = 1;
+        return cmd->c > 0;
+    case 6: /* a WAD patch at native size */
+        if (doom_patch_size(cmd->text, &patch_w, &patch_h) == false) {
+            return false;
+        }
+        *x = cmd->a;
+        *y = cmd->b;
+        *width = patch_w;
+        *height = patch_h;
+        return true;
+    default:
+        /* op 7 scales a picture to an arbitrary width, and op 8 is the 3D
+         * view, whose height only the level knows.  Neither can be bounded
+         * here without doing the work the damage is meant to avoid. */
+        return false;
+    }
+}
 static void copy_out(const char *from, char *to, int max);
 static void copy_error(struct lua_host *host, const char *text);
 
@@ -1032,10 +1095,21 @@ void lua_host_service(struct lua_host *host)
     /* A script that draws the same commands as last frame has not changed what
      * is on screen, so the window does not need repainting.  Compared field by
      * field rather than with memcmp, because the struct has padding that
-     * memcmp would read. */
+     * memcmp would read.
+     *
+     * While comparing, the rectangles of the commands that differ are unioned
+     * into a damage rectangle, so the compositor can repaint just that part of
+     * the window instead of all of it.  Text is measured rather than guessed,
+     * because a rectangle that is too small leaves stale pixels behind and
+     * nothing else would notice. */
     {
         bool same = host->draw_count == host->previous_count;
+        int box_x = 0;
+        int box_y = 0;
+        int box_w = 0;
+        int box_h = 0;
 
+        host->has_damage_rect = false;
         for (int index = 0; same && index < host->draw_count; ++index) {
             const struct lua_draw *now = &host->draw[index];
             const struct lua_draw *was = &host->previous[index];
@@ -1057,6 +1131,61 @@ void lua_host_service(struct lua_host *host)
         if (same) {
             return;
         }
+
+        if (host->draw_count != host->previous_count) {
+            /* A different number of commands means the indices no longer line
+             * up, so which pixels are stale is not worth working out. */
+        } else {
+            for (int index = 0; index < host->draw_count; ++index) {
+                const struct lua_draw *now = &host->draw[index];
+                const struct lua_draw *was = &host->previous[index];
+                bool differs = (now->op != was->op || now->a != was->a ||
+                                now->b != was->b || now->c != was->c ||
+                                now->d != was->d || now->radius != was->radius ||
+                                now->colour != was->colour ||
+                                memcmp(now->text, was->text,
+                                       sizeof(now->text)) != 0);
+                int x;
+                int y;
+                int width;
+                int height;
+
+                if (differs == false) {
+                    continue;
+                }
+                if (draw_bounds(now, &x, &y, &width, &height) == false) {
+                    host->has_damage_rect = false;
+                    box_w = 0;
+                    break;
+                }
+                if (host->has_damage_rect == false) {
+                    box_x = x;
+                    box_y = y;
+                    box_w = width;
+                    box_h = height;
+                    host->has_damage_rect = true;
+                } else {
+                    int right = (box_x + box_w > x + width) ? box_x + box_w
+                                                            : x + width;
+                    int bottom = (box_y + box_h > y + height) ? box_y + box_h
+                                                             : y + height;
+
+                    if (x < box_x) {
+                        box_x = x;
+                    }
+                    if (y < box_y) {
+                        box_y = y;
+                    }
+                    box_w = right - box_x;
+                    box_h = bottom - box_y;
+                }
+            }
+        }
+        host->damage_rect.x = box_x;
+        host->damage_rect.y = box_y;
+        host->damage_rect.width = box_w;
+        host->damage_rect.height = box_h;
+
         for (int index = 0; index < host->draw_count &&
                             index < LUA_DRAW_MAX; ++index) {
             host->previous[index] = host->draw[index];
@@ -1068,6 +1197,15 @@ void lua_host_service(struct lua_host *host)
 bool lua_host_list_changed(const struct lua_host *host)
 {
     return host != 0 && host->list_changed;
+}
+
+bool lua_host_damage_rect(const struct lua_host *host, struct gfx_rect *out)
+{
+    if (host == 0 || out == 0 || host->has_damage_rect == false) {
+        return false;
+    }
+    *out = host->damage_rect;
+    return out->width > 0 && out->height > 0;
 }
 
 void lua_host_draw(struct lua_host *host, struct gfx_surface *surface, int x,
