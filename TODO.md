@@ -52,7 +52,17 @@ a vanilla-format reading would give. Checked against the real file, not assumed.
 - [x] A boot order fix, without which a real filesystem on the disk stopped the
       kernel booting at all
 - [ ] Damage only the bounding box of what a script changed, rather than the
-      whole window, and a wide-copy present path
+      whole window, and a wide-copy present path.
+      Half done and uncommitted: the host already diffs the display list to
+      decide whether anything changed, and that diff now also unions the
+      rectangles of the commands that differ, so the damage can be that box
+      rather than the window. Text is measured with the font rather than
+      estimated, because a box that is too small leaves stale pixels and
+      nothing downstream would notice. The clock narrows 676 of 690 repaints
+      this way. The wide-copy present path is already there: gfx_present uses
+      a per-row memcpy, which is what that item was really asking for. Still
+      to do: check for visual artifacts, and measure rows presented, which is
+      the number that says whether this is worth anything.
 - [x] FAT16 mounted on the ATA disk: directories, long filenames, read and
       write, so files have real paths
 - [x] Larger VFS capacity: 4 MiB across 8192 blocks, 512 nodes and 256 KiB per
@@ -82,6 +92,43 @@ a vanilla-format reading would give. Checked against the real file, not assumed.
       is the settings app, a Doom high score table, and Lua apps saving state.
       The write path is implemented already and only needs a caller.
 - [ ] Userspace and ring 3, so Lua apps stop running in ring 0
+- [ ] Linux binary support, so an existing program can run rather than
+      everything being written for Klye. Specced in full under
+      "Linux binary support" below; the short version is an ELF loader, the
+      syscall ABI, and a filesystem in Linux's layout. It needs ring 3, which
+      is the item above, and that is the whole reason ring 3 is early on the
+      list rather than at the end.
+
+### PCI and virtio
+
+There is no PCI code and no virtio code at all: no enumeration, no BAR
+mapping, no DMA-capable mapping, no driver. Everything today is legacy: the
+framebuffer comes from Multiboot and the disk is ATA PIO at 0x1F0. These three
+are in order because each one is useless without the one before it.
+
+- [ ] PCI enumeration: walk the bus via config space 0xCF8/0xCFC, read each
+      device's vendor and device id, class and subclass, and header type, and
+      report what is on the bus. No mapping yet, just the list. QEMU has an
+      emulated bus to check it against, so this is verifiable on its own.
+- [ ] BAR mapping: size each base address register by writing all ones and
+      reading back the mask, then map the assigned region. MMIO rather than
+      port IO, which is what a modern device wants.
+- [ ] DMA-capable physical mappings. The MMU maps pages the CPU can reach, and
+      that is the wrong property for this: a device needs a physical address it
+      can put in a descriptor. Needs an identity or bus-address mapping, and
+      ideally an IOMMU, which is a much bigger thing.
+- [ ] virtio transport: the PCI capability chain, the common configuration
+      structure, queue setup with the split virtqueue layout, and the notify
+      path. Every virtio device needs this, so it is worth doing once.
+- [ ] A first virtio device, to prove the transport. virtio-blk would be the
+      honest choice: it replaces the PIO disk path and is testable against a
+      file-backed QEMU disk.
+- [ ] VIRTIO-GPU with virgl for accelerated 3D, once the transport works.
+      Worth being clear-eyed about the payoff: this offloads to the host GPU,
+      which helps a renderer that already works. The current renderer is
+      software and cannot even texture a wall yet, so this is not what unblocks
+      a Doom port. It is for when there is a software renderer worth speeding
+      up.
 - [ ] Doom sprites are not pixel exact: a post length byte does not match the
       pixels that follow it, and a k+2 fudge renders a stretched but
       recognisable Doomguy. Pictures are exact, which is what the title screen
@@ -91,8 +138,6 @@ a vanilla-format reading would give. Checked against the real file, not assumed.
 
 - [x] Boot the real DOOM WAD: the title screen renders from it, read out of
       FAT16
-- [ ] PCI enumeration, BAR mapping, DMA-capable physical mappings
-- [ ] VIRTIO-GPU with virgl for accelerated 3D
 
 ## Next phase, once the list above is done
 
