@@ -164,10 +164,24 @@ are in order because each one is useless without the one before it.
       device the address the CPU writes through, which is only right because
       the heap is identity mapped, and the heap is in the high half, so this
       is not a given. It is why the DMA item below is not optional.
-- [x] A first virtio device, to prove the transport: virtio-blk, reading a
-      sector through the queue. Verified with the ISO attached as a virtio
-      block device and booted through it, so a machine that cannot use virtio
-      does not start at all.
+- [ ] Parked, not finished: a block request on the queue never completes.
+      The handshake is sound and verified on two different machine
+      configurations: the device is found, features read, the status byte
+      reaches DRIVER_OK, the queue is laid out at 256 descriptors, and the
+      descriptor is published with the available index at 1. The used ring
+      never moves, and the device's status does not change, so it is not
+      objecting and it is not erroring: it is not acting on the request.
+      Ruled out by measurement rather than by reasoning: the physical address
+      (the heap is in the high half, so a heap pointer was never one, and
+      taking the ring from the mapping window fixed that), the ring layout
+      (both page aligned and end to end), the feature negotiation, a heap
+      overflow in the request, and re-running setup over a live queue. Not
+      ruled out: that the notify reaches the device at all. The legacy
+      interface's interrupt status byte would show it, and that is the next
+      thing to look at when this is picked up again.
+      A modern transport path is started alongside the legacy one and shares
+      the queue layout. It is not being selected, because the device's 16 KiB
+      memory register is not being recognised, which is itself unexplained.
 - [ ] VIRTIO-GPU with virgl for accelerated 3D, once the transport works.
       Worth being clear-eyed about the payoff: this offloads to the host GPU,
       which helps a renderer that already works. The current renderer is

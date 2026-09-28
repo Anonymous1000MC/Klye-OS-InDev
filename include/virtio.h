@@ -110,28 +110,23 @@ struct virtio_blk_request {
 struct virtio_device {
     const struct pci_device *pci;
     uint16_t io;                  /* the legacy port register base */
-    struct virtio_blk_request request;
+    volatile uint8_t *modern;     /* the common configuration block, when there
+                                   * is one: the modern interface publishes its
+                                   * registers in a memory BAR, the legacy one
+                                   * in ports */
+    bool use_modern;
     uint64_t ring_virtual;   /* the window allocation, as the CPU sees it */
     uint64_t physical;       /* and where that is in the machine */
     uint32_t request_offset; /* the request header's offset into it */
-    uint32_t data_offset;    /* and the data buffer's */  /* the header in front of a transfer */
-    uint32_t ring_bytes;          /* the contiguous ring allocation */
+    uint32_t data_offset;    /* and the data buffer's */
+    uint32_t ring_bytes;     /* the size of that allocation */
     void *ring;
     uint64_t device_features;   /* 64 features, in two 32 bit words */
     uint64_t driver_features;
     uint16_t queue_count;
     struct virtio_queue queue[2];
     bool ready;
-    bool modern;
     uint16_t device_id;
-    uint16_t num_queues_reported;   /* as the device says, even after a failure */
-    uint16_t select_readback;
-    uint32_t pfn;            /* the frame number handed to the device */
-    uint8_t last_isr;
-    uint16_t last_queue_size;
-    uint8_t last_status;        /* after a failed request, for working out why */
-    uint16_t last_used_index;
-    uint16_t last_avail_index;
 };
 
 /* Find a virtio device by its PCI device id, or 0.  A modern device is
@@ -176,6 +171,26 @@ void virtio_notify(struct virtio_device *device, int queue);
 #define VIRTIO_LEGACY_QUEUE_NOTIFY 0x10
 #define VIRTIO_LEGACY_STATUS 0x12
 #define VIRTIO_LEGACY_ISR 0x13
+
+/* Offsets in the modern common configuration block, published in the device's
+ * memory register rather than in ports. */
+#define VIRTIO_COMMON_FEATURE_SELECT 0x00
+#define VIRTIO_COMMON_DEVICE_FEATURE 0x04
+#define VIRTIO_COMMON_DRIVER_SELECT 0x08
+#define VIRTIO_COMMON_DRIVER_FEATURE 0x0C
+#define VIRTIO_COMMON_MSIX_CONFIG 0x10
+#define VIRTIO_COMMON_NUM_QUEUES 0x12
+#define VIRTIO_COMMON_STATUS 0x14
+#define VIRTIO_COMMON_QUEUE_SELECT 0x16
+#define VIRTIO_COMMON_QUEUE_SIZE 0x18
+#define VIRTIO_COMMON_QUEUE_ENABLE 0x1C
+#define VIRTIO_COMMON_QUEUE_NOTIFY_OFF 0x1E
+#define VIRTIO_COMMON_QUEUE_DESC 0x20
+#define VIRTIO_COMMON_QUEUE_DRIVER 0x28
+#define VIRTIO_COMMON_QUEUE_DEVICE 0x30
+#define VIRTIO_F_VERSION_1 32
+#define VIRTIO_MODERN_REGION 16384U
+#define VIRTIO_NOTIFY_OFFSET 0x3000
 
 /* Reason for the most recent failure, or "" if none. */
 const char *virtio_error(void);

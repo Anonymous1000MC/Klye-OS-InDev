@@ -1423,21 +1423,6 @@ static void cmd_vblkread(char **tokens, int count)
     if (rc != 0) {
         terminal_puts(": request failed, code ");
         shell_printf_u64((uint64_t)(-rc));
-        terminal_puts("\n    pfn ");
-        shell_printf_u64((uint64_t)device->queue[0].pfn);
-        terminal_puts("  physical ");
-        shell_printf_u64(device->physical);
-        terminal_puts("\n    desc0 ");
-        shell_printf_u64(device->queue[0].desc[0].address);
-        terminal_puts("  desc1 ");
-        shell_printf_u64(device->queue[0].desc[1].address);
-        terminal_puts("\n    avail ");
-        shell_printf_u64((uint64_t)device->queue[0].avail->index);
-        terminal_puts("  used ");
-        shell_printf_u64((uint64_t)device->queue[0].used->index);
-        terminal_puts("  status ");
-        shell_printf_u64((uint64_t)virtio_status(device));
-        terminal_puts("\n");
         return;
     }
     terminal_puts(" read back\n    first 32 bytes:");
@@ -1476,7 +1461,8 @@ static void cmd_virtio(void)
     }
     pci = device->pci;
     terminal_puts("  virtio block device\n");
-    terminal_puts("    interface  legacy port register\n");
+    terminal_puts("    interface  ");
+    terminal_puts(device->use_modern ? "modern (memory)\n" : "legacy (ports)\n");
     terminal_puts("    vendor  1af4  device  ");
     shell_printf_hex_line(device->device_id);
     terminal_puts("\n");
@@ -1484,10 +1470,7 @@ static void cmd_virtio(void)
     if (virtio_setup(device) == false) {
         terminal_puts("    setup failed: ");
         terminal_puts(virtio_error());
-        terminal_puts("\n    num_queues  ");
-        shell_printf_u64((uint64_t)device->num_queues_reported);
-        terminal_puts("  select readback  ");
-        shell_printf_u64((uint64_t)device->select_readback);
+        terminal_puts("\n");
         return;
     }
     terminal_puts("    device features  0x");
