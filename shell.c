@@ -22,6 +22,7 @@ extern long strtol(const char *text, char **end, int base);
 #include "kernel.h"
 #include "scheduler.h"
 #include "pci.h"
+#include "virtio.h"
 #include "shell.h"
 #include "theme.h"
 #include "wm.h"
@@ -31,6 +32,7 @@ static void shell_printf_u64(uint64_t value);
 static int shell_pad_int(char *out, uint32_t value, int width);
 static int shell_pad_hex(char *out, uint32_t value, int width);
 static int shell_pad_text(char *out, const char *text, int width);
+static void shell_printf_hex_line(uint32_t value);
 static void shell_pad(char *buffer, int width);
 static void shell_row(const char *name, const char *value, int width);
 static void shell_format_uptime(char *buffer, int limit);
@@ -1247,7 +1249,8 @@ static void cmd_pci(char **tokens, int count)
             if (device->bar[bar].present == false) {
                 continue;
             }
-            if (device->bar[bar].size == 0U) {
+
+        if (device->bar[bar].size == 0U) {
                 terminal_puts("      bar");
                 shell_printf_u64((uint64_t)bar);
                 terminal_puts(device->bar[bar].unsized ? ": no size reported\n"
@@ -1260,6 +1263,11 @@ static void cmd_pci(char **tokens, int count)
             shell_printf_u64((uint64_t)device->bar[bar].size);
             terminal_puts(" bytes");
             if (device->bar[bar].mapped) {
+                /* the first word of device memory, which is how to tell a
+                 * working mapping from one that reads nothing */
+                terminal_puts("  reads ");
+                shell_printf_hex_line(
+                    *(volatile uint32_t *)(uintptr_t)device->bar[bar].virtual_address);
                 terminal_puts("  at ");
                 shell_printf_u64(device->bar[bar].virtual_address);
             } else if (device->bar[bar].is_io == false) {
@@ -1330,6 +1338,25 @@ static int shell_pad_hex(char *out, uint32_t value, int width)
     return at;
 }
 
+/* A number in hex, for a device id. */
+static void shell_printf_hex_line(uint32_t value)
+{
+    static const char digits[] = "0123456789abcdef";
+    char text[16];
+    int length = 0;
+
+    if (value == 0U) {
+        text[length++] = '0';
+    }
+    while (value != 0U && length < 8) {
+        text[length++] = digits[value & 0xFU];
+        value >>= 4;
+    }
+    for (int index = length - 1; index >= 0; --index) {
+        { char one[2] = { text[index], 0 }; terminal_puts(one); }
+    }
+}
+
 /* A string, left aligned in `width`, for the same tables.  It does not
  * terminate: these rows are built up in place and the caller ends the string
  * once, and text_copy's habit of writing a terminator would cut the rest of
@@ -1346,6 +1373,56 @@ static int shell_pad_text(char *out, const char *text, int width)
         out[at++] = ' ';
     }
     return at;
+}
+
+/* "virtio" finds a virtio device, maps it and sets up its queues, then
+ * prints what was negotiated.  The transport only: no data has moved through
+ * the queue yet, so the numbers here are what the device offered and what this
+ * driver agreed to, not the result of a transfer. */
+static void cmd_virtio(void)
+{
+    struct virtio_device *device = virtio_find(1U); /* 1 is block */
+    const struct pci_device *pci;
+
+    if (device == 0) {
+        terminal_puts("  no virtio block device on the bus\n");
+        terminal_puts("  try: qemu -device virtio-blk-pci,drive=...\n");
+        return;
+    }
+    pci = device->pci;
+    terminal_puts("  virtio block device\n");
+    terminal_puts("    interface  ");
+    terminal_puts(device->modern ? "modern (memory)\n" : "legacy (ports)\n");
+    terminal_puts("    vendor  1af4  device  ");
+    shell_printf_hex_line(device->device_id);
+    terminal_puts("\n");
+
+    if (virtio_setup(device) == false) {
+        terminal_puts("    setup failed: ");
+        terminal_puts(virtio_error());
+        terminal_puts("\n");
+        return;
+    }
+    terminal_puts("    device features  0x");
+    shell_printf_u64(device->device_features);
+    terminal_puts("\n    driver features  0x");
+    shell_printf_u64(device->driver_features);
+    terminal_puts("\n    status  driver ok, features negotiated\n");
+    terminal_puts("    queues   ");
+    shell_printf_u64((uint64_t)device->queue_count);
+    terminal_puts("\n");
+    for (int index = 0; index < 2 && index < (int)device->queue_count; ++index) {
+        terminal_puts("      q");
+        shell_printf_u64((uint64_t)index);
+        terminal_puts("  size ");
+        shell_printf_u64((uint64_t)device->queue[index].size);
+        terminal_puts("  free ");
+        shell_printf_u64((uint64_t)virtio_queue_free(device, index));
+        terminal_puts("  used ");
+        shell_printf_u64((uint64_t)virtio_queue_used(device, index));
+        terminal_puts("\n");
+    }
+    (void)pci;
 }
 
 static void cmd_sysinfo(void)
@@ -2678,6 +2755,8 @@ void shell_execute(const char *line)
         cmd_files();
     } else if (text_equal(tokens[0], "ata")) {
         cmd_ata();
+    } else if (text_equal(tokens[0], "virtio")) {
+        cmd_virtio();
     } else if (text_equal(tokens[0], "pci")) {
         cmd_pci(tokens, count);
     } else if (text_equal(tokens[0], "ataread")) {

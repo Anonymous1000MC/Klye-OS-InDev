@@ -57,6 +57,7 @@ struct pci_device {
     bool unsized;  /* the device did not report a size for this register */
     bool present;  /* the device implements this register at all */   /* pci_map_all() gave it at least one mapping */
     bool has_memory_bar;
+    bool decoding_failed; /* the command register would not keep the enable bits */
     struct pci_bar bar[6];
 };
 

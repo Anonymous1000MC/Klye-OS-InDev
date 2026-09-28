@@ -3,6 +3,7 @@
 
 #include "mmu.h"
 #include "heap.h"
+#include "kernel.h"
 
 #define PTE_PRESENT   0x001U
 #define PTE_WRITE     0x002U
@@ -107,6 +108,17 @@ static uint64_t *vm_next_table(uint64_t *table, uint32_t index, uint32_t flags)
 /* Walk to the leaf table for `virtual_address`, creating levels as needed.
  * Intermediate levels always get 4 KiB granularity, so this returns a page
  * table whose entries are leaf entries. */
+/* The leaf page table: the table whose entries are page frames, so that
+ * vm_map_page can index it by the low bits of a virtual address.
+ *
+ * Three levels of descent from the top: the top level entry, then the page
+ * directory pointer, then the page table.  A fourth step would follow the page
+ * table's entry and land on the page itself, which is not a table at all, and
+ * a write there lands in the page's contents while the entry it was meant to
+ * describe stays whatever it was.  Nothing fails: the store succeeds, reading
+ * it back succeeds, and the address is simply never mapped.  The mapping
+ * window is created by the same walk, so it inherits the same off by one and
+ * the window's own entries are wrong too. */
 static uint64_t *vm_leaf_table(uint64_t virtual_address)
 {
     uint32_t pml4_index = (uint32_t)((virtual_address >> 39) & 0x1FFU);
@@ -114,27 +126,23 @@ static uint64_t *vm_leaf_table(uint64_t virtual_address)
     uint32_t pd_index = (uint32_t)((virtual_address >> 21) & 0x1FFU);
     uint32_t pt_index = (uint32_t)((virtual_address >> 12) & 0x1FFU);
     uint64_t root = vm_read_cr3();
-    uint64_t *level4 = vm_next_table(vm_table_at(root), pml4_index, PTE_FLAGS);
-    uint64_t *level3;
-    uint64_t *level2;
-    uint64_t *level1;
+    uint64_t *pdpt = vm_next_table(vm_table_at(root), pml4_index, PTE_FLAGS);
+    uint64_t *pd;
+    uint64_t *pt;
 
-    if (level4 == 0) {
+    if (pdpt == 0) {
         return 0;
     }
-    level3 = vm_next_table(level4, pdpt_index, PTE_FLAGS);
-    if (level3 == 0) {
+    pd = vm_next_table(pdpt, pdpt_index, PTE_FLAGS);
+    if (pd == 0) {
         return 0;
     }
-    level2 = vm_next_table(level3, pd_index, PTE_FLAGS);
-    if (level2 == 0) {
+    pt = vm_next_table(pd, pd_index, PTE_FLAGS);
+    if (pt == 0) {
         return 0;
     }
-    level1 = vm_next_table(level2, pt_index, PTE_FLAGS);
-    if (level1 == 0) {
-        return 0;
-    }
-    return level1;
+    (void)pt_index; /* the index belongs to the caller, which has the address */
+    return pt;
 }
 
 bool vm_init(void)
@@ -185,6 +193,14 @@ bool vm_map_page(uint64_t virtual_address, uint64_t physical_address)
     }
     index = (uint32_t)((virtual_address >> 12) & 0x1FFU);
     table[index] = (physical_address & PTE_ADDR_MASK) | PTE_FLAGS;
+    /* Read the entry back through the page tables rather than trusting the
+     * store.  The leaf table is ordinary memory, and anything that maps it
+     * wrongly writes somewhere else, which looks exactly like a working
+     * mapping right up until something is read through it. */
+    if ((table[index] & PTE_ADDR_MASK) != (physical_address & PTE_ADDR_MASK)) {
+        vm_fail("the page table entry did not hold what was written to it");
+        return false;
+    }
     vm_flush_tlb();
     return true;
 }

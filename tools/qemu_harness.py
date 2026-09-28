@@ -94,7 +94,8 @@ class Qmp:
 
 
 class Guest:
-    def __init__(self, tag, iso=ISO, mem='512M', port=4444, disk=None):
+    def __init__(self, tag, iso=ISO, mem='512M', port=4444, disk=None,
+                 extra=()):
         self.tag = tag
         self.log_path = '/tmp/opencode/%s.log' % tag
         self.gdb_path = '127.0.0.1:%d' % port
@@ -121,7 +122,7 @@ class Guest:
             '-gdb', 'tcp:' + self.gdb_path,
             '-qmp', 'unix:%s,server,nowait' % self.qmp_path,
             '-no-reboot',
-        ], stdout=subprocess.DEVNULL,
+        ] + list(extra), stdout=subprocess.DEVNULL,
             stderr=open('/tmp/opencode/%s.err' % tag, 'w'))
         time.sleep(1.0)
         self.q = Qmp(self.qmp_path)

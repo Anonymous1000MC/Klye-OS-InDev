@@ -6,6 +6,7 @@
 #include "pci.h"
 
 #include "io.h"
+#include "kernel.h"
 #include "mmu.h"
 
 static struct pci_device devices[PCI_MAX_DEVICES];
@@ -49,6 +50,21 @@ static void config_write(uint8_t bus, uint8_t device, uint8_t function,
 
     outl(PCI_CONFIG_ADDRESS, address);
     outl(PCI_CONFIG_DATA, value);
+}
+
+/* Write 16 bits of config space.  A base address register is 32 bits wide but
+ * the command register beside it is 16, and a plain 32 bit write at the same
+ * offset puts zeroes over the status register that follows.  Reading, masking
+ * and writing back is the only way to touch half a register with a port this
+ * wide. */
+static void config_write16(uint8_t bus, uint8_t device, uint8_t function,
+                            uint8_t offset, uint16_t value)
+{
+    uint32_t shift = (uint32_t)(offset & 2U) * 8U;
+    uint32_t old = config_read(bus, device, function, offset);
+
+    config_write(bus, device, function, offset,
+                 (old & ~(0xFFFFU << shift)) | ((uint32_t)value << shift));
 }
 
 uint32_t pci_read32(const struct pci_device *device, uint8_t offset)
@@ -337,8 +353,8 @@ static bool map_device(struct pci_device *device)
      * instead of the few hundred bytes it actually occupies.  It also shrinks
      * the window in which the device answers to a bogus address, which is the
      * hazard of sizing by write at all. */
-    config_write(device->bus, device->device, device->function, 0x04,
-                 command & ~0x0003U);
+    config_write16(device->bus, device->device, device->function, 0x04,
+                   (uint16_t)(command & ~0x0003U));
     size_bars(device);
     for (uint8_t index = 0; index < 6; ++index) {
         if (device->bar[index].present == false) {
@@ -357,6 +373,14 @@ static bool map_device(struct pci_device *device)
         bar->virtual_address =
             (uint64_t)(uintptr_t)vm_map_physical(bar->address, bar->size);
         bar->mapped = bar->virtual_address != 0U;
+        if (bar->mapped) {
+            uint64_t back = vm_to_physical(bar->virtual_address);
+
+            if (back != bar->address) {
+                bar->mapped = false;
+                fail("the mapping did not come back as the address asked for");
+            }
+        }
     }
     {
         uint16_t new_command = (uint16_t)(command | 0x0001U);
@@ -364,9 +388,22 @@ static bool map_device(struct pci_device *device)
         if (device->has_memory_bar) {
             new_command |= 0x0002U;
         }
-        if (new_command != command) {
-            config_write(device->bus, device->device, device->function, 0x04,
-                         new_command);
+        /* Always write the register, even when the value has not changed from
+         * what was read before sizing.  The comparison is against the value
+         * saved at the start, but that is not what the device holds now,
+         * because the sizing step just cleared the enable bits.  Comparing
+         * against it means the re-enable is skipped, and every device is left
+         * with decoding off and no memory to answer with, which looks exactly
+         * like a device that has none. */
+        config_write16(device->bus, device->device, device->function, 0x04,
+                       new_command);
+        {
+            uint16_t back = pci_read16(device, 0x04);
+
+            if ((back & 0x0003U) != (new_command & 0x0003U)) {
+                device->decoding_failed = true;
+                return false;
+            }
         }
         return (new_command & 0x0002U) != 0U;
     }

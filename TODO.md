@@ -83,7 +83,25 @@ a vanilla-format reading would give. Checked against the real file, not assumed.
 - [x] VFS host test. It had none, which is the other half of why the broken
       write path survived: a filesystem with no tests, exercised only by an
       image that is regenerated at build time.
-- [ ] Full PMM: guard pages, demand paging, DMA-capable physical mappings
+- [x] Fix the mapping walk, which was one level too deep. The leaf table
+      helper descended four levels instead of three, so it returned the mapped
+      page rather than the table describing it, and every page table entry
+      this driver ever wrote landed in the contents of a page instead. Nothing
+      failed: the store succeeded, reading it back succeeded, and the address
+      was simply never mapped. Anything that used it happened to work by way
+      of the boot identity map, which is why the VFS appeared fine and was not.
+      Found by asking the two things to agree: vm_map_page verified its own
+      store and vm_to_physical disagreed, and the only way both can be right
+      is if they are reading different tables.
+- [x] PCI decoding left off after sizing. Sizing a register needs the device
+      to stop decoding first, and the re-enable was skipped because the value
+      was compared against the register as read before the disable rather than
+      as it stood after it. Every device was left unable to answer, which looks
+      exactly like a device with no memory. The write now always happens.
+- [x] 16 bit config space writes. The command register is 16 bits and the
+      status register sits beside it, so a 32 bit write at the same offset put
+      zeroes over the status. Read, mask, write back.
+- [ ] Full PMM: guard pages, demand paging
 - [ ] Persist user data to the FAT16 data partition: config, and game state.
       Not `kpm install`: a live system's root is the RAM VFS, so an installed
       app has nowhere to live, and the FAT volume is a data volume rather than a
