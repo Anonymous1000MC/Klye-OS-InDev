@@ -16,6 +16,7 @@
 #include "wm.h"
 #include "ata.h"
 #include "blob.h"
+#include "fat.h"
 #include "mmu.h"
 #include "vfs.h"
 
@@ -819,6 +820,19 @@ void kernel_main(uint64_t framebuffer_address, uint32_t pitch,
     } else {
         serial_write("mmu: ");
         serial_write(vm_error());
+        serial_write("\n");
+    }
+    /* A real FAT volume is preferred over the flat manifest image, since it
+     * has directories and survives a reboot. */
+    if (fat_mount()) {
+        serial_write("fat: ");
+        serial_write(fat_label());
+        serial_write(", ");
+        serial_write_decimal(ata_sector_count() / 2048U);
+        serial_write(" MiB\n");
+    } else {
+        serial_write("fat: ");
+        serial_write(fat_error());
         serial_write("\n");
     }
     if (blob_mount()) {

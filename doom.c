@@ -2,6 +2,7 @@
 
 #include "doom.h"
 #include "blob.h"
+#include "fat.h"
 #include "wad.h"
 
 static uint32_t doom_palette[DOOM_PALETTE_SIZE];
@@ -10,6 +11,15 @@ static uint32_t doom_image_length;
 static int doom_palettes;
 static int doom_palette_current;
 static char doom_error_text[64] = "";
+
+/* The buffer came from whichever of the two filesystems supplied it, so it has
+ * to go back the same way.  `from_fat` is set by whichever load succeeded. */
+static bool doom_image_from_fat;
+
+static void doom_image_release(void *pointer)
+{
+    blob_release_any(pointer, doom_image_from_fat);
+}
 
 static void doom_fail(const char *why)
 {
@@ -66,21 +76,23 @@ bool doom_open_wad(const char *path)
 
     doom_error_text[0] = 0;
     if (doom_image != 0) {
-        blob_release(doom_image);
+        doom_image_release(doom_image);
         doom_image = 0;
         doom_image_length = 0;
     }
-    if (!blob_load(path, &image, &length)) {
+    /* The FAT volume is a real filesystem and is tried first; the flat image is
+     * only a fallback for a disk that has not been reformatted yet. */
+    if (!blob_load_any(path, &image, &length, &doom_image_from_fat)) {
         doom_fail(blob_error());
         return false;
     }
     if (!wad_open(image, length)) {
-        blob_release(image);
+        doom_image_release(image);
         doom_fail(wad_error());
         return false;
     }
     if (!doom_load_palette(image, length)) {
-        blob_release(image);
+        doom_image_release(image);
         return false;
     }
     doom_image = image;

@@ -31,6 +31,16 @@ const char *blob_name(uint32_t index);
 /* Size of the named file in bytes, or 0 when there is no such file. */
 uint32_t blob_size(const char *path);
 
+/* Load a file from whichever filesystem has it: the FAT volume if one is
+ * mounted, otherwise the flat image.  Every caller should use this rather than
+ * picking a source, so they all behave the same way.  True when the file came
+ * from FAT, which is what blob_release_any needs. */
+bool blob_load_any(const char *path, void **out, uint32_t *length,
+                   bool *from_fat);
+
+/* Release a buffer from blob_load_any. */
+void blob_release_any(void *pointer, bool from_fat);
+
 /* Load a whole file into a fresh heap buffer.  On success stores a pointer
  * that the caller must free with blob_release, sets *length to the file size,
  * and returns true.  On failure returns false, leaves *out alone, and sets a

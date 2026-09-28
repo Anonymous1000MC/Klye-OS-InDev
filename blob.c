@@ -4,6 +4,7 @@
 #include "blob.h"
 #include "ata.h"
 #include "heap.h"
+#include "fat.h"
 #include "io.h"
 #include "mmu.h"
 
@@ -302,6 +303,31 @@ void blob_release(void *pointer)
         }
     }
     heap_free(pointer);
+}
+
+bool blob_load_any(const char *path, void **out, uint32_t *length,
+                   bool *from_fat)
+{
+    bool fat = false;
+
+    if (fat_ready() && fat_read(path, out, length)) {
+        fat = true;
+    } else if (blob_load(path, out, length) == false) {
+        return false;
+    }
+    if (from_fat != 0) {
+        *from_fat = fat;
+    }
+    return true;
+}
+
+void blob_release_any(void *pointer, bool from_fat)
+{
+    if (from_fat) {
+        fat_release(pointer);
+    } else {
+        blob_release(pointer);
+    }
 }
 
 const char *blob_error(void)

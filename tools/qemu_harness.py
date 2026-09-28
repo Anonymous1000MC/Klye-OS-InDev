@@ -107,6 +107,13 @@ class Guest:
             'qemu-system-x86_64',
             '-cdrom', iso,
             '-drive', 'file=%s,format=raw,if=ide,index=0,media=disk' % disk,
+            # Boot the CD, not the disk.  A FAT volume carries the 0x55AA boot
+            # signature, so SeaBIOS treats it as bootable, jumps to sector 0,
+            # and spins forever in the non-bootable code mkfs.fat leaves
+            # there: no serial output at all, and the CPU parked below the
+            # kernel.  The old flat image had no signature, so the disk was
+            # skipped and this never showed up.
+            '-boot', 'order=d',
             '-m', mem,
             '-serial', 'file:%s' % self.log_path,
             '-display', 'none',

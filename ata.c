@@ -268,12 +268,25 @@ bool ata_identify(void)
             ata_fail("drive is a slave or empty");
             return false;
         }
-        ata_sectors = words[60] & 0x0FFFFFFFU;
-        if (words[60] & 0x10000000U) {
-            /* the high word of the sector count, for drives over 256 TiB */
-            uint32_t high = words[61] & 0x0FFFFFFFU;
+        /* The LBA28 sector count is a 32-bit value split across words 60 and
+         * 61, not a single word.  A 64 MiB disk is 131072 sectors, which is
+         * 0x20000 and does not fit in sixteen bits, so reading only word 60
+         * reported the drive as having no sectors at all.  Bit 28 of the pair
+         * is the LBA48 flag, and the real count for those is in words 100-103. */
+        {
+            uint32_t lba28 = (uint32_t)words[60] |
+                             ((uint32_t)words[61] << 16);
 
-            ata_sectors |= high << 28;
+            if ((lba28 & 0x10000000U) != 0U) {
+                uint64_t wide = (uint64_t)words[100] |
+                                ((uint64_t)words[101] << 16) |
+                                ((uint64_t)words[102] << 32) |
+                                ((uint64_t)words[103] << 48);
+
+                ata_sectors = (uint32_t)(wide & 0x0FFFFFFFU);
+            } else {
+                ata_sectors = lba28 & 0x0FFFFFFFU;
+            }
         }
         for (int index = 0; index < 40; ++index) {
             ata_model_text[index] = (char)(words[27 + (uint32_t)index / 2U] >>

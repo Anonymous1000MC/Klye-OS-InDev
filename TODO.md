@@ -24,11 +24,17 @@ Ordered so each blocker sits above whatever depends on it.
 - [x] Skip repainting a script that drew the same thing again: a static window
       went from 133 composites per 3 s to 0, and a full compose is 14.4 ms
       (69 fps) with the present already damage limited to 28 rows
+- [x] FAT16 on the ATA disk: real directories, long filenames, read and write
+- [x] A boot order fix, without which a real filesystem on the disk stopped the
+      kernel booting at all
 - [ ] Damage only the bounding box of what a script changed, rather than the
       whole window, and a wide-copy present path
-- [ ] A real filesystem on the block layer, so installed apps survive a reboot
+- [x] FAT16 mounted on the ATA disk: directories, long filenames, read and
+      write, so files have real paths
 - [ ] Larger VFS capacity: more nodes, more blocks, and much bigger files
 - [ ] Full PMM: guard pages, demand paging, DMA-capable physical mappings
+- [ ] Point `kpm install` at the FAT16 write path, so an installed app survives
+      a reboot for real rather than just being possible
 - [ ] Userspace and ring 3, so Lua apps stop running in ring 0
 - [ ] Doom sprites are not pixel exact: a post length byte does not match the
       pixels that follow it, and a k+2 fudge renders a stretched but

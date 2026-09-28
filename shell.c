@@ -4,6 +4,7 @@
 #include "apps.h"
 #include "ata.h"
 #include "blob.h"
+#include "fat.h"
 #include "wad.h"
 #include "vfs.h"
 #include "gfx.h"
@@ -719,11 +720,12 @@ static void cmd_wadinfo(char **tokens, int count)
     void *buffer = 0;
     uint32_t length = 0;
     int levels = 0;
+    bool from_fat = false;
 
     if (count > 1) {
         path = tokens[1];
     }
-    if (!blob_load(path, &buffer, &length)) {
+    if (!blob_load_any(path, &buffer, &length, &from_fat)) {
         terminal_puts("wadinfo: ");
         terminal_puts(blob_error());
         terminal_puts("\n");
@@ -734,7 +736,7 @@ static void cmd_wadinfo(char **tokens, int count)
         terminal_puts("wadinfo: ");
         terminal_puts(wad_error());
         terminal_puts("\n");
-        blob_release(buffer);
+        blob_release_any(buffer, from_fat);
         terminal_error();
         return;
     }
@@ -797,7 +799,51 @@ static void cmd_wadinfo(char **tokens, int count)
     terminal_puts("  levels found: ");
     terminal_printf_number((uint64_t)levels);
     terminal_puts("\n");
-    blob_release(buffer);
+    blob_release_any(buffer, from_fat);
+}
+
+/* "fatl [dir]" lists a directory on the FAT volume.  This is the real
+ * filesystem, so it has directories rather than a flat manifest of names. */
+static void cmd_fatl(char **tokens, int count)
+{
+    const char *path = "/";
+    struct fat_stat entries[64];
+    int found;
+
+    if (count > 1) {
+        path = tokens[1];
+    }
+    if (!fat_ready()) {
+        terminal_puts("fatl: no FAT volume; ");
+        terminal_puts(fat_error());
+        terminal_puts("\n");
+        terminal_error();
+        return;
+    }
+    found = fat_list(path, entries, 64);
+    if (found < 0) {
+        terminal_puts("fatl: ");
+        terminal_puts(fat_error());
+        terminal_puts("\n");
+        terminal_error();
+        return;
+    }
+    terminal_puts("fatl ");
+    terminal_puts(path);
+    terminal_puts(": ");
+    terminal_printf_number((uint64_t)found);
+    terminal_puts(" entries\n");
+    for (int index = 0; index < found; ++index) {
+        terminal_puts("  ");
+        terminal_puts(entries[index].directory ? "d " : "- ");
+        terminal_puts(entries[index].name);
+        if (entries[index].directory == 0) {
+            terminal_puts("  ");
+            terminal_printf_number((uint64_t)entries[index].size);
+            terminal_puts(" bytes");
+        }
+        terminal_puts("\n");
+    }
 }
 
 static void cmd_files(void)
@@ -2315,6 +2361,8 @@ void shell_execute(const char *line)
         cmd_wadcheck(tokens, count);
     } else if (text_equal(tokens[0], "wadinfo")) {
         cmd_wadinfo(tokens, count);
+    } else if (text_equal(tokens[0], "fatl")) {
+        cmd_fatl(tokens, count);
     } else if (text_equal(tokens[0], "files")) {
         cmd_files();
     } else if (text_equal(tokens[0], "ata")) {

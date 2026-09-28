@@ -13,7 +13,7 @@ BUILD_DIR := build
 # This has to come after BUILD_DIR, since := expands immediately.
 DISK_DIR ?= disk
 DISK_IMAGE := $(BUILD_DIR)/klye.img
-DISK_SIZE_MIB ?= 32
+DISK_SIZE_MIB ?= 64
 ISO_DIR := $(BUILD_DIR)/isodir
 KERNEL := $(BUILD_DIR)/klye.elf
 
@@ -35,7 +35,7 @@ ROOTFS := rootfs
 TOOLS := $(BUILD_DIR)/tools
 VFS_IMAGE := $(BUILD_DIR)/vfs_image.c
 
-C_SOURCES := kernel.c scheduler.c mem.c heap.c libc.c gfx.c font.c input.c vfs.c launcher.c kby.c kas.c apps.c shell.c wm.c gui.c lua_host.c ata.c blob.c mmu.c wad.c doom.c
+C_SOURCES := kernel.c scheduler.c mem.c heap.c libc.c gfx.c font.c input.c vfs.c launcher.c kby.c kas.c apps.c shell.c wm.c gui.c lua_host.c ata.c blob.c mmu.c wad.c doom.c fat.c
 ASM_SOURCES := interrupts.S context.S fpu.S setjmp.S
 
 # Lua 5.4.7 core plus the base/string/table/math/utf8 libraries.  The io, os,
@@ -156,11 +156,15 @@ $(TARGET): $(KERNEL) grub/grub.cfg | $(ISO_DIR)/boot/grub
 # is far too large to live in the ISO's built-in filesystem.
 disk:
 	@mkdir -p $(BUILD_DIR)
-	python3 tools/mkdisk.py $(DISK_DIR) $(DISK_IMAGE) $(DISK_SIZE_MIB)
+	python3 tools/mkfatdisk.py $(DISK_DIR) $(DISK_IMAGE) $(DISK_SIZE_MIB)
 
+# -boot order=d matters once the disk carries a filesystem: a FAT volume has
+# the 0x55AA boot signature, so the BIOS would boot the disk instead of the CD
+# and hang with no serial output.
 run: $(TARGET)
 	$(QEMU) -cdrom $(TARGET) -m 512M \
-	  -drive file=$(DISK_IMAGE),format=raw,if=ide,index=0,media=disk
+	  -drive file=$(DISK_IMAGE),format=raw,if=ide,index=0,media=disk \
+	  -boot order=d
 
 # Run with no disk at all, for when you are not testing disk-backed features.
 run-nodisk: $(TARGET)
