@@ -2532,7 +2532,12 @@ static void service_lua(void)
             continue;
         }
         lua_host_service(host);
-        wm.windows[index].content_dirty = 1;
+        /* only when the display list actually changed: a static window that
+         * repaints identically every tick would otherwise force a redraw, and
+         * for a picture that means decoding every pixel again for nothing */
+        if (lua_host_list_changed(host)) {
+            wm.windows[index].content_dirty = 1;
+        }
     }
 }
 

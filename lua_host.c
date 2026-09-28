@@ -55,6 +55,13 @@ struct lua_host {
     int paint_ref;
     struct lua_draw draw[LUA_DRAW_MAX];
     int draw_count;
+    /* The previous frame's list, so a script that draws the same thing every
+     * frame can be recognised and skipped.  Decoding a picture is per-pixel, so
+     * a static window that repaints on every tick costs a full redraw for
+     * nothing. */
+    struct lua_draw previous[LUA_DRAW_MAX];
+    int previous_count;
+    bool list_changed;
     int mouse_x;
     int mouse_y;
     bool mouse_down;
@@ -877,6 +884,46 @@ void lua_host_service(struct lua_host *host)
         return;
     }
     call_callback(host, host->paint_ref, "paint", 1);
+
+    /* A script that draws the same commands as last frame has not changed what
+     * is on screen, so the window does not need repainting.  Compared field by
+     * field rather than with memcmp, because the struct has padding that
+     * memcmp would read. */
+    {
+        bool same = host->draw_count == host->previous_count;
+
+        for (int index = 0; same && index < host->draw_count; ++index) {
+            const struct lua_draw *now = &host->draw[index];
+            const struct lua_draw *was = &host->previous[index];
+
+            if (now->op != was->op || now->a != was->a || now->b != was->b ||
+                now->c != was->c || now->d != was->d ||
+                now->radius != was->radius || now->colour != was->colour) {
+                same = false;
+            } else {
+                for (int at = 0; at < (int)sizeof(now->text); ++at) {
+                    if (now->text[at] != was->text[at]) {
+                        same = false;
+                        break;
+                    }
+                }
+            }
+        }
+        host->list_changed = !same;
+        if (same) {
+            return;
+        }
+        for (int index = 0; index < host->draw_count &&
+                            index < LUA_DRAW_MAX; ++index) {
+            host->previous[index] = host->draw[index];
+        }
+        host->previous_count = host->draw_count;
+    }
+}
+
+bool lua_host_list_changed(const struct lua_host *host)
+{
+    return host != 0 && host->list_changed;
 }
 
 void lua_host_draw(struct lua_host *host, struct gfx_surface *surface, int x,

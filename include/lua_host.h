@@ -36,6 +36,10 @@ const char *lua_host_error(const struct lua_host *host);
 
 /* Steps the script for one frame and replays its draw list. */
 void lua_host_service(struct lua_host *host);
+
+/* True when the last service produced a different display list than the one
+ * before it, meaning the window genuinely needs repainting. */
+bool lua_host_list_changed(const struct lua_host *host);
 void lua_host_draw(struct lua_host *host, struct gfx_surface *surface, int x,
                    int y, int width, int height);
 
