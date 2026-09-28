@@ -105,10 +105,19 @@ mapping, no DMA-capable mapping, no driver. Everything today is legacy: the
 framebuffer comes from Multiboot and the disk is ATA PIO at 0x1F0. These three
 are in order because each one is useless without the one before it.
 
-- [ ] PCI enumeration: walk the bus via config space 0xCF8/0xCFC, read each
+- [x] PCI enumeration: walk the bus via config space 0xCF8/0xCFC, read each
       device's vendor and device id, class and subclass, and header type, and
-      report what is on the bus. No mapping yet, just the list. QEMU has an
-      emulated bus to check it against, so this is verifiable on its own.
+      report what is on the bus. `pci` in the shell. Found 5 devices on
+      QEMU's emulated bus: the PIIX3 ISA bridge, the PIIX3 IDE controller on
+      two functions, the QEMU VGA, and the emulated Intel NIC, with its
+      memory and IO base address registers. Bridges are followed to their
+      secondary bus rather than stopping at bus 0.
+      The byte offsets were wrong at first and quietly so: the class code,
+      header type and the bridge's secondary bus were all read from the low
+      byte of a 32 bit read, which is the revision ID and the latency timer
+      rather than the fields wanted. Every value returned was a real byte from
+      the right device, so the table filled with plausible nonsense, and the
+      giveaway was only that the ISA bridge claimed to be a network card.
 - [ ] BAR mapping: size each base address register by writing all ones and
       reading back the mask, then map the assigned region. MMIO rather than
       port IO, which is what a modern device wants.

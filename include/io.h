@@ -27,6 +27,20 @@ static inline uint16_t inw(uint16_t port)
     return value;
 }
 
+/* 32 bit port access, which PCI config space needs: its data port is four
+ * bytes wide and is not readable as four separate byte ports. */
+static inline void outl(uint16_t port, uint32_t value)
+{
+    __asm__ volatile("outl %0, %1" : : "a"(value), "Nd"(port));
+}
+
+static inline uint32_t inl(uint16_t port)
+{
+    uint32_t value;
+    __asm__ volatile("inl %1, %0" : "=a"(value) : "Nd"(port));
+    return value;
+}
+
 static inline void io_wait(void)
 {
     outb(0x80, 0);

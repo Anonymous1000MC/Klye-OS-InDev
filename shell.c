@@ -21,12 +21,16 @@ extern long strtol(const char *text, char **end, int base);
 #include "launcher.h"
 #include "kernel.h"
 #include "scheduler.h"
+#include "pci.h"
 #include "shell.h"
 #include "theme.h"
 #include "wm.h"
 
 static int shell_u32_to_text(char *buffer, uint32_t value);
 static void shell_printf_u64(uint64_t value);
+static int shell_pad_int(char *out, uint32_t value, int width);
+static int shell_pad_hex(char *out, uint32_t value, int width);
+static int shell_pad_text(char *out, const char *text, int width);
 static void shell_pad(char *buffer, int width);
 static void shell_row(const char *name, const char *value, int width);
 static void shell_format_uptime(char *buffer, int limit);
@@ -1174,6 +1178,130 @@ static void cmd_free(void)
     terminal_puts(" composed at ");
     shell_printf_u64((uint64_t)wm_fps());
     terminal_puts(" fps\n");
+}
+
+/* "pci" walks the bus and prints what is on it.
+ *
+ * This is the enumeration layer on its own: identity and class, with the base
+ * address registers shown as the device set them and not sized or mapped.  A
+ * BAR needs to be sized by writing all ones to it and reading back the mask,
+ * which makes the device briefly claim an address range it does not have, and
+ * that does not belong in a command that only means to look. */
+static void cmd_pci(char **tokens, int count)
+{
+    int found;
+
+    (void)tokens;
+    (void)count;
+    found = pci_enumerate();
+    terminal_puts("  bus dev fn  vendor  device  class              bars\n");
+    for (int index = 0; index < found; ++index) {
+        const struct pci_device *device = pci_device_at(index);
+        const char *vendor = pci_vendor_name(device->vendor);
+        char row[192];
+        int at = 0;
+
+        at += shell_pad_int(row + at, device->bus, 3);
+        at += shell_pad_int(row + at, device->device, 4);
+        at += shell_pad_int(row + at, device->function, 4);
+        at += shell_pad_hex(row + at, device->vendor, 4);
+        at += shell_pad_hex(row + at, device->device_id, 5);
+        at += shell_pad_text(row + at, pci_class_name(device->class_code,
+                                                      device->subclass), 19);
+        for (int bar = 0; bar < 6; ++bar) {
+            if ((uint32_t)bar >= (uint32_t)device->bar_count) {
+                continue;
+            }
+            row[at++] = ' ';
+            at += shell_pad_hex(row + at, (uint32_t)device->bar[bar].address, 8);
+            if (device->bar[bar].is_io) {
+                row[at++] = 'i';
+                row[at++] = 'o';
+            }
+        }
+        row[at] = 0;
+        terminal_puts("  ");
+        terminal_puts(row);
+        if (vendor != 0) {
+            terminal_puts("  ");
+            terminal_puts(vendor);
+        }
+        terminal_puts("\n");
+    }
+    if (found == 0) {
+        terminal_puts("  no PCI bus\n");
+        return;
+    }
+    terminal_puts("  ");
+    shell_printf_u64((uint64_t)found);
+    terminal_puts(" device(s); base address registers are as the device set\n");
+    terminal_puts("  them, not sized or mapped\n");
+}
+
+/* A decimal or hex number, right aligned in `width`, for the tables the shell
+ * prints.  The kernel has no printf with a width specifier, and a bus listing
+ * is unreadable without the columns lining up. */
+static int shell_pad_int(char *out, uint32_t value, int width)
+{
+    char digits[16];
+    int length = 0;
+    int at = 0;
+
+    if (value == 0U) {
+        digits[length++] = '0';
+    }
+    while (value != 0U && length < (int)sizeof(digits)) {
+        digits[length++] = (char)('0' + (value % 10U));
+        value /= 10U;
+    }
+    for (int pad = length; pad < width; ++pad) {
+        out[at++] = ' ';
+    }
+    for (int index = length - 1; index >= 0; --index) {
+        out[at++] = digits[index];
+    }
+    return at;
+}
+
+static int shell_pad_hex(char *out, uint32_t value, int width)
+{
+    static const char digits[] = "0123456789abcdef";
+    char text[16];
+    int length = 0;
+    int at = 0;
+
+    if (value == 0U) {
+        text[length++] = '0';
+    }
+    while (value != 0U && length < (int)sizeof(text)) {
+        text[length++] = digits[value & 0xFU];
+        value >>= 4;
+    }
+    for (int pad = length; pad < width; ++pad) {
+        out[at++] = ' ';
+    }
+    for (int index = length - 1; index >= 0; --index) {
+        out[at++] = text[index];
+    }
+    return at;
+}
+
+/* A string, left aligned in `width`, for the same tables.  It does not
+ * terminate: these rows are built up in place and the caller ends the string
+ * once, and text_copy's habit of writing a terminator would cut the rest of
+ * the row off at the first call. */
+static int shell_pad_text(char *out, const char *text, int width)
+{
+    int length = text_length(text);
+    int at = 0;
+
+    for (int index = 0; index < length && index < width; ++index) {
+        out[at++] = text[index];
+    }
+    for (int pad = (length > width ? width : length); pad < width; ++pad) {
+        out[at++] = ' ';
+    }
+    return at;
 }
 
 static void cmd_sysinfo(void)
@@ -2506,6 +2634,8 @@ void shell_execute(const char *line)
         cmd_files();
     } else if (text_equal(tokens[0], "ata")) {
         cmd_ata();
+    } else if (text_equal(tokens[0], "pci")) {
+        cmd_pci(tokens, count);
     } else if (text_equal(tokens[0], "ataread")) {
         cmd_ataread(tokens, count);
     } else if (text_equal(tokens[0], "bench")) {
