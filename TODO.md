@@ -21,7 +21,11 @@ Ordered so each blocker sits above whatever depends on it.
 
 ## Next
 
-- [ ] Dirty-rectangle tracking and a row blitter for a stable 60 FPS
+- [x] Skip repainting a script that drew the same thing again: a static window
+      went from 133 composites per 3 s to 0, and a full compose is 14.4 ms
+      (69 fps) with the present already damage limited to 28 rows
+- [ ] Damage only the bounding box of what a script changed, rather than the
+      whole window, and a wide-copy present path
 - [ ] A real filesystem on the block layer, so installed apps survive a reboot
 - [ ] Larger VFS capacity: more nodes, more blocks, and much bigger files
 - [ ] Full PMM: guard pages, demand paging, DMA-capable physical mappings
