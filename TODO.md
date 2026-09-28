@@ -109,6 +109,19 @@ a vanilla-format reading would give. Checked against the real file, not assumed.
       is the settings app, a Doom high score table, and Lua apps saving state.
       The write path is implemented already and only needs a caller.
 - [ ] Userspace and ring 3, so Lua apps stop running in ring 0
+      The privilege switch itself works: `usertest` reaches ring 3 with cs 0x23,
+      ss 0x1B and rip at its entry point, and the descriptor table and TSS are
+      correct. It is refused executing its first instruction, with a page fault
+      whose error code is 5 -- user, protection. The cause is the page tables:
+      `PTE_FLAGS` in mmu.c is `PTE_PRESENT | PTE_WRITE` with no user bit, so
+      every mapping is supervisor-only, and the user program is linked into
+      kernel `.text` with its stack in kernel `.bss`. The fix is not a flag on
+      the leaf entry: the CPU requires U/S at all four paging levels, and that
+      range shares its PML4, PDPT and PD entries with the kernel, so a new
+      user-accessible range with its own tables is needed, and the program and
+      its stack have to live in it. Nothing has yet completed in ring 3, so the
+      syscall path -- `write`, `exit`, the `lretq` out and the `sysretq` back --
+      is written but entirely unverified.
 - [ ] Linux binary support, so an existing program can run rather than
       everything being written for Klye. Specced in full under
       "Linux binary support" below; the short version is an ELF loader, the
