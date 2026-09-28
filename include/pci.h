@@ -32,9 +32,13 @@
  * value the device offered and `is_io` says which kind of space it is. */
 struct pci_bar {
     uint64_t address;
-    uint32_t size;   /* 0 until the sizing pass exists */
+    uint32_t size;   /* 0 when unimplemented, or before pci_map_all() */
+    uint64_t virtual_address; /* where it is mapped, 0 until it is */
     bool is_io;
     bool is_64bit;
+    bool mapped;
+    bool unsized;  /* the device did not report a size for this register */
+    bool present;  /* the device implements this register at all */
 };
 
 struct pci_device {
@@ -49,6 +53,10 @@ struct pci_device {
     uint8_t header_type;  /* 0 for a plain device, 1 for a bridge */
     uint8_t bar_count;
     bool multifunction;
+    bool mapped;
+    bool unsized;  /* the device did not report a size for this register */
+    bool present;  /* the device implements this register at all */   /* pci_map_all() gave it at least one mapping */
+    bool has_memory_bar;
     struct pci_bar bar[6];
 };
 
@@ -66,6 +74,19 @@ const struct pci_device *pci_device_at(int index);
  * either matches anything, which is how a driver asks for "any display" or
  * "anything on this bus". */
 const struct pci_device *pci_find(int class_code, int subclass);
+
+/* Size every base address register, map the memory ones, and turn on the
+ * device's memory or IO decoding.
+ *
+ * Sizing a register means writing all ones to it and reading back the mask,
+ * then putting the original value straight back, because in between the
+ * device believes it answers at the top of the address space.  This is the
+ * known hazard of the method and is the reason it is a separate step from
+ * enumeration: enumeration only reads, and cannot leave a device in a state it
+ * was not already in.
+ *
+ * Returns how many devices ended up with a mapping. */
+int pci_map_all(void);
 
 /* Read 8, 16 or 32 bits of a device's config space.  The narrow widths read
  * the enclosing 32 bits and keep the right part, because 0xCFC to 0xCFF are

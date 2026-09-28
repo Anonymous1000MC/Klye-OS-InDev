@@ -30,6 +30,13 @@ bool vm_init(void);
  * frames or the tables are unavailable.  Zero filled. */
 void *vm_alloc_pages(size_t bytes);
 
+/* Map a range of physical addresses into the mapping window, without taking
+ * frames for it, and release it again.  For hardware: a PCI base address
+ * register names a place in the machine's physical address space that the CPU
+ * cannot reach until something maps it.  Returns the virtual address, or 0. */
+void *vm_map_physical(uint64_t physical_address, size_t bytes);
+void vm_unmap_range(void *address, size_t bytes);
+
 /* Release a reservation from vm_alloc_pages. */
 void vm_free_pages(void *address, size_t bytes);
 

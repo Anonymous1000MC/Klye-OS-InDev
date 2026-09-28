@@ -1190,15 +1190,26 @@ static void cmd_free(void)
 static void cmd_pci(char **tokens, int count)
 {
     int found;
+    bool map = false;
 
-    (void)tokens;
     (void)count;
     found = pci_enumerate();
+    if (count > 1 && text_equal(tokens[1], "map")) {
+        int mapped = pci_map_all();
+
+        map = true;
+
+        terminal_puts("  sized and mapped ");
+        shell_printf_u64((uint64_t)mapped);
+        terminal_puts(" of ");
+        shell_printf_u64((uint64_t)found);
+        terminal_puts(" device(s)\n");
+    }
     terminal_puts("  bus dev fn  vendor  device  class              bars\n");
     for (int index = 0; index < found; ++index) {
         const struct pci_device *device = pci_device_at(index);
         const char *vendor = pci_vendor_name(device->vendor);
-        char row[192];
+        char row[280];
         int at = 0;
 
         at += shell_pad_int(row + at, device->bus, 3);
@@ -1207,9 +1218,9 @@ static void cmd_pci(char **tokens, int count)
         at += shell_pad_hex(row + at, device->vendor, 4);
         at += shell_pad_hex(row + at, device->device_id, 5);
         at += shell_pad_text(row + at, pci_class_name(device->class_code,
-                                                      device->subclass), 19);
+                                                      device->subclass), 12);
         for (int bar = 0; bar < 6; ++bar) {
-            if ((uint32_t)bar >= (uint32_t)device->bar_count) {
+            if (device->bar[bar].present == false) {
                 continue;
             }
             row[at++] = ' ';
@@ -1217,6 +1228,9 @@ static void cmd_pci(char **tokens, int count)
             if (device->bar[bar].is_io) {
                 row[at++] = 'i';
                 row[at++] = 'o';
+            }
+            if (device->bar[bar].unsized) {
+                row[at++] = '?';
             }
         }
         row[at] = 0;
@@ -1227,6 +1241,32 @@ static void cmd_pci(char **tokens, int count)
             terminal_puts(vendor);
         }
         terminal_puts("\n");
+        /* the sizes and the virtual addresses go on their own lines, because
+         * putting them on the device line runs past 80 columns and wraps */
+        for (int bar = 0; bar < 6; ++bar) {
+            if (device->bar[bar].present == false) {
+                continue;
+            }
+            if (device->bar[bar].size == 0U) {
+                terminal_puts("      bar");
+                shell_printf_u64((uint64_t)bar);
+                terminal_puts(device->bar[bar].unsized ? ": no size reported\n"
+                                                        : ": unused\n");
+                continue;
+            }
+            terminal_puts("      bar");
+            shell_printf_u64((uint64_t)bar);
+            terminal_puts(device->bar[bar].is_io ? " io   " : " mem  ");
+            shell_printf_u64((uint64_t)device->bar[bar].size);
+            terminal_puts(" bytes");
+            if (device->bar[bar].mapped) {
+                terminal_puts("  at ");
+                shell_printf_u64(device->bar[bar].virtual_address);
+            } else if (device->bar[bar].is_io == false) {
+                terminal_puts("  (not mapped)");
+            }
+            terminal_puts("\n");
+        }
     }
     if (found == 0) {
         terminal_puts("  no PCI bus\n");
@@ -1234,8 +1274,12 @@ static void cmd_pci(char **tokens, int count)
     }
     terminal_puts("  ");
     shell_printf_u64((uint64_t)found);
-    terminal_puts(" device(s); base address registers are as the device set\n");
-    terminal_puts("  them, not sized or mapped\n");
+    terminal_puts(" device(s)");
+    if (map) {
+        terminal_puts("; sized, memory ones mapped, decoding enabled\n");
+    } else {
+        terminal_puts("; base address registers as set, not sized or mapped\n");
+    }
 }
 
 /* A decimal or hex number, right aligned in `width`, for the tables the shell

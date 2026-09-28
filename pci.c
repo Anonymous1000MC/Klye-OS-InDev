@@ -6,6 +6,7 @@
 #include "pci.h"
 
 #include "io.h"
+#include "mmu.h"
 
 static struct pci_device devices[PCI_MAX_DEVICES];
 static int device_count;
@@ -35,6 +36,19 @@ static uint32_t config_read(uint8_t bus, uint8_t device, uint8_t function,
 
     outl(PCI_CONFIG_ADDRESS, address);
     return inl(PCI_CONFIG_DATA);
+}
+
+/* Writing config space, which the sizing pass needs.  Enumeration alone never
+ * writes; sizing a BAR does, and only by accident, twice. */
+static void config_write(uint8_t bus, uint8_t device, uint8_t function,
+                         uint8_t offset, uint32_t value)
+{
+    uint32_t address = 0x80000000U | ((uint32_t)bus << 16) |
+                       ((uint32_t)device << 11) | ((uint32_t)function << 8) |
+                       ((uint32_t)offset & 0xFCU);
+
+    outl(PCI_CONFIG_ADDRESS, address);
+    outl(PCI_CONFIG_DATA, value);
 }
 
 uint32_t pci_read32(const struct pci_device *device, uint8_t offset)
@@ -134,16 +148,23 @@ static void read_bars(struct pci_device *out)
         bool is_io = (raw & 1U) != 0U;
         bool low = (raw & 2U) != 0U; /* for memory, 32 or 64 bit addressing */
 
-        bar->address = is_io ? (raw & 0xFFFFFFF0U) : (raw & 0xFFFFFFF0U);
+        bar->address = raw & 0xFFFFFFF0U;
         bar->is_io = is_io;
         bar->is_64bit = (is_io == false) && (low != 0U);
         bar->size = 0;
+        bar->present = false;
+        bar->unsized = false;
+        bar->mapped = false;
+        bar->virtual_address = 0U;
         if (raw == 0U) {
-            continue; /* a unimplemented BAR, and not a reserved one */
+            continue; /* an unimplemented BAR, which is not a reserved one */
         }
-        if (out->bar_count < 6) {
-            out->bar_count++;
-        }
+        /* Presence is tracked per register rather than as a count, because a
+         * count is not an index.  A device with bar0 and bar2 implemented and
+         * bar1 not has two bars, and using that two as a loop bound would size
+         * bar0 and bar1 and never touch bar2. */
+        bar->present = true;
+        out->bar_count++;
     }
 }
 
@@ -227,6 +248,144 @@ static bool record(uint8_t bus, uint8_t device, uint8_t function,
         }
     }
     return true;
+}
+
+/* Work out how large each base address register is.
+ *
+ * The method is to write all ones into the register and read back what sticks.
+ * The bits that stay are the size mask, and the size is that mask plus one:
+ * a 4 KiB region leaves bits 0 through 11 set, which is 0xFFF, and 0xFFF + 1
+ * is 4 KiB.  The original value is written back immediately, because between
+ * the two writes the device believes it owns an address range at the top of
+ * the address space and will answer to anyone who asks.
+ *
+ * The two reads cannot be avoided, and the window is left as short as it can
+ * be.  A device that decodes its BAR during the write can be talked to by
+ * software in that gap, which is the known hazard of this method; on this
+ * machine nothing does, and closing the window properly needs a device model
+ * cooperation that does not exist. */
+static void size_bars(struct pci_device *device)
+{
+    for (uint8_t index = 0; index < 6; ++index) {
+        if (device->bar[index].present == false) {
+            continue;
+        }
+        uint8_t offset = (uint8_t)(0x10U + index * 4U);
+        uint32_t original = config_read(device->bus, device->device,
+                                        device->function, offset);
+        uint32_t mask;
+        bool is_io = (original & 1U) != 0U;
+
+        /* An unimplemented BAR reads as zero and must not be written: all
+         * ones to a register the device does not implement is not a mask, it
+         * is whatever the device decides to latch. */
+        if (original == 0U) {
+            device->bar[index].size = 0;
+            continue;
+        }
+        config_write(device->bus, device->device, device->function, offset,
+                     0xFFFFFFFFU);
+        mask = config_read(device->bus, device->device, device->function,
+                           offset);
+        config_write(device->bus, device->device, device->function, offset,
+                     original);
+        /* Bits 0 and 1 are read only flags, not address.  They read as set,
+         * so leaving them in would put them in the size. */
+        mask &= is_io ? 0xFFFFFFFCU : 0xFFFFFFF0U;
+        if (mask == (is_io ? 0xFFFFFFFCU : 0xFFFFFFF0U)) {
+            /* Everything came back set, so the device told us nothing. */
+            device->bar[index].size = 0;
+            device->bar[index].unsized = true;
+            continue;
+        }
+        /* The mask is the set of bits that vary with the size, so the size is
+         * what is left of the bits, plus one: a 16 MiB region leaves
+         * 0xFF000000 set and leaves 0x00FFFFFF clear, and 0x00FFFFFF + 1 is
+         * 16 MiB.  Adding one to the mask instead gives 0xFF000001, which is
+         * a plausible looking number that is 4 GiB minus 4 KiB. */
+        {
+            uint32_t size = (mask == 0U) ? 0U : (~mask + 1U);
+            /* A base address register covers a power of two, always.  A
+             * result that is not one did not come from a size mask: it is
+             * either reserved bits read as set or a device that latched the
+             * write instead of masking it.  Either way the number is fiction,
+             * and mapping a window for it would be worse than not mapping. */
+            if (size != 0U && (size & (size - 1U)) != 0U) {
+                device->bar[index].size = 0;
+                device->bar[index].unsized = true;
+                continue;
+            }
+            device->bar[index].size = size;
+        }
+    }
+}
+
+/* Map one device's memory registers and turn on its decoding.
+ *
+ * Nothing is reserved first.  The device owns the range its BAR names, and
+ * taking frames for it would not stop the device writing there, so the honest
+ * thing is to map exactly what the BAR says and let the driver be careful.
+ * Memory decoding is enabled only after the mapping succeeded, so a device is
+ * never left decoding a region the CPU has no mapping for. */
+static bool map_device(struct pci_device *device)
+{
+    uint32_t command = pci_read16(device, 0x04);
+
+    /* Turn decoding off before sizing and back on after.  A device that is
+     * decoding while its register holds all ones is decoding the top of the
+     * address space, which is how an IO register ends up sizing to 4 GiB
+     * instead of the few hundred bytes it actually occupies.  It also shrinks
+     * the window in which the device answers to a bogus address, which is the
+     * hazard of sizing by write at all. */
+    config_write(device->bus, device->device, device->function, 0x04,
+                 command & ~0x0003U);
+    size_bars(device);
+    for (uint8_t index = 0; index < 6; ++index) {
+        if (device->bar[index].present == false) {
+            continue;
+        }
+        struct pci_bar *bar = &device->bar[index];
+
+        if (bar->is_io) {
+            /* port IO needs no mapping, the port number is the address */
+            continue;
+        }
+        if (bar->size == 0U || bar->address == 0U) {
+            continue;
+        }
+        device->has_memory_bar = true;
+        bar->virtual_address =
+            (uint64_t)(uintptr_t)vm_map_physical(bar->address, bar->size);
+        bar->mapped = bar->virtual_address != 0U;
+    }
+    {
+        uint16_t new_command = (uint16_t)(command | 0x0001U);
+
+        if (device->has_memory_bar) {
+            new_command |= 0x0002U;
+        }
+        if (new_command != command) {
+            config_write(device->bus, device->device, device->function, 0x04,
+                         new_command);
+        }
+        return (new_command & 0x0002U) != 0U;
+    }
+}
+
+int pci_map_all(void)
+{
+    int mapped = 0;
+
+    if (device_count == 0) {
+        pci_enumerate();
+    }
+    for (int index = 0; index < device_count; ++index) {
+        if (map_device(&devices[index])) {
+            devices[index].mapped = true;
+            mapped++;
+        }
+    }
+    return mapped;
 }
 
 int pci_enumerate(void)

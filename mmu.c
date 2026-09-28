@@ -230,6 +230,72 @@ void vm_unmap_page(uint64_t virtual_address)
     vm_flush_tlb();
 }
 
+/* Map a range of physical addresses somewhere in the mapping window, without
+ * taking frames for it.
+ *
+ * This is for hardware.  A PCI base address register names a place in the
+ * machine's physical address space, and to reach it the CPU needs that
+ * physical address visible at some virtual address.  vm_alloc_pages cannot do
+ * this because it allocates, and the address already exists: it belongs to
+ * the device.
+ *
+ * Nothing here reserves the memory first.  The device claims the range through
+ * its base address register, and firmware or the device model has already
+ * decided it, so the right thing is to trust the BAR and map what it says.
+ * A caller that wants the memory reserved should say so separately, and for
+ * device memory that usually means asking the device not to use it yet. */
+void *vm_map_physical(uint64_t physical_address, size_t bytes)
+{
+    uint64_t start;
+    uint32_t count;
+    uint64_t base = physical_address & ~(uint64_t)(VM_PAGE_BYTES - 1U);
+
+    vm_error_text[0] = 0;
+    if (bytes == 0U) {
+        return 0;
+    }
+    if (!vm_init()) {
+        return 0;
+    }
+    count = (uint32_t)((bytes + VM_PAGE_BYTES - 1U) / VM_PAGE_BYTES);
+    if (vm_window_next + (uint64_t)count * VM_PAGE_BYTES > vm_window_limit) {
+        vm_fail("the mapping window is full");
+        return 0;
+    }
+    start = vm_window_next;
+    for (uint32_t index = 0; index < count; ++index) {
+        uint64_t virtual_address = start + (uint64_t)index * VM_PAGE_BYTES;
+        uint64_t physical = base + (uint64_t)index * VM_PAGE_BYTES;
+
+        /* A partially mapped range is worse than none, because the caller has
+         * no way to tell how much of it worked. */
+        if (!vm_map_page(virtual_address, physical)) {
+            for (uint32_t undo = 0; undo < index; ++undo) {
+                vm_unmap_page(start + (uint64_t)undo * VM_PAGE_BYTES);
+            }
+            vm_fail("cannot map that range");
+            return 0;
+        }
+    }
+    vm_window_next += (uint64_t)count * VM_PAGE_BYTES;
+    return (void *)(uintptr_t)start;
+}
+
+void vm_unmap_range(void *address, size_t bytes)
+{
+    uint64_t start = (uint64_t)(uintptr_t)address;
+    uint32_t count = (uint32_t)((bytes + VM_PAGE_BYTES - 1U) / VM_PAGE_BYTES);
+
+    for (uint32_t index = 0; index < count; ++index) {
+        vm_unmap_page(start + (uint64_t)index * VM_PAGE_BYTES);
+    }
+    if (start + (uint64_t)count * VM_PAGE_BYTES == vm_window_next) {
+        /* hand the tail of the window back, so a caller that maps and unmaps
+         * in a loop does not run the window out */
+        vm_window_next = start;
+    }
+}
+
 void *vm_alloc_pages(size_t bytes)
 {
     uint64_t start;
