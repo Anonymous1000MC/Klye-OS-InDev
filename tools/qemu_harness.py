@@ -20,6 +20,8 @@ import time
 REPO = '/run/media/daffa/abe1503c-e264-426b-a21a-8697892d03e6/klye-os'
 ELF = os.path.join(REPO, 'build/klye.elf')
 ISO = os.path.join(REPO, 'klye.iso')
+DISK_IMAGE = os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), 'build', 'klye.img')
 
 QMAP = {
     'a': 'a', 'b': 'b', 'c': 'c', 'd': 'd', 'e': 'e', 'f': 'f', 'g': 'g',
@@ -99,7 +101,7 @@ class Guest:
         for path in (self.log_path, self.qmp_path):
             if os.path.exists(path):
                 os.unlink(path)
-        disk = disk or '/tmp/opencode/klye.img'
+        disk = disk or DISK_IMAGE
         self.disk_path = disk
         self.proc = subprocess.Popen([
             'qemu-system-x86_64',

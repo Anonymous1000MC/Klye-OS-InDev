@@ -18,7 +18,8 @@ Ordered so each blocker sits above whatever depends on it.
 - [x] ATA PIO driver on the legacy IDE ports
 - [x] Disk image format and whole-file loads for large files
 - [x] Dynamic page mapping, so large buffers need not be contiguous
-- [ ] WAD directory parsing and lump access
+- [x] `make disk` and a disk image the harness attaches, so a WAD is reachable
+- [x] WAD directory parsing and lump access
 - [ ] A real filesystem on the block layer, so installed apps survive a reboot
 - [ ] Larger VFS capacity: more nodes, more blocks, and much bigger files
 - [ ] Full PMM: dynamic page mapping, guard pages, demand paging

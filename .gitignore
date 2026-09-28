@@ -2,3 +2,9 @@ build/
 klye.iso
 *.o
 *.log
+__pycache__/
+# game data and disk images are not source
+disk/**/*.WAD
+disk/**/*.wad
+*.wad
+*.WAD

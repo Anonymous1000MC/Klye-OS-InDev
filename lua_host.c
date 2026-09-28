@@ -18,6 +18,7 @@
 #include "apps.h"
 #include "font.h"
 #include "gfx.h"
+#include "doom.h"
 #include "heap.h"
 #include "lua_host.h"
 #include "theme.h"
@@ -61,6 +62,11 @@ struct lua_host {
     int key_head;
     int key_tail;
     uint32_t frame;
+    /* the client area size, refreshed when the compositor replays this host's
+     * draw list.  A script cannot otherwise know how big its window is, and
+     * anything that centres or scales needs to. */
+    int width;
+    int height;
     bool yielded;
     bool failed;
     bool used;
@@ -68,8 +74,161 @@ struct lua_host {
 
 static struct lua_host hosts[LUA_HOST_LIMIT];
 
+static void draw_push(struct lua_host *host, uint8_t op, int32_t a, int32_t b,
+                      int32_t c, int32_t d, int32_t radius, uint32_t colour,
+                      const char *text);
 static void copy_out(const char *from, char *to, int max);
 static void copy_error(struct lua_host *host, const char *text);
+
+/* ------------------------------------------------------------ doom -------- */
+/* Doom's own graphics, exposed to scripts so a title screen or a level view is
+ * a few lines of Lua rather than a native app. */
+
+static int doom_l_open(lua_State *L)
+{
+    const char *path = luaL_checkstring(L, 1);
+
+    if (doom_open_wad(path) == false) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, doom_error());
+        return 2;
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+static int doom_l_lumps(lua_State *L)
+{
+    (void)L;
+    lua_pushinteger(L, doom_wad_lumps());
+    return 1;
+}
+
+static int doom_l_palettes(lua_State *L)
+{
+    (void)L;
+    lua_pushinteger(L, doom_palette_count());
+    return 1;
+}
+
+static int doom_l_palette(lua_State *L)
+{
+    int index = (int)luaL_checkinteger(L, 1);
+
+    doom_set_palette(index);
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+static int doom_l_color(lua_State *L)
+{
+    uint32_t index = (uint32_t)luaL_checkinteger(L, 1);
+    uint32_t color = doom_color(index);
+
+    /* returned as three bytes so a script can build a colour without knowing
+     * how the packer is laid out */
+    lua_pushinteger(L, (lua_Integer)((color >> 16) & 0xFFU));
+    lua_pushinteger(L, (lua_Integer)((color >> 8) & 0xFFU));
+    lua_pushinteger(L, (lua_Integer)(color & 0xFFU));
+    return 3;
+}
+
+static int doom_l_size(lua_State *L)
+{
+    int width = 0;
+    int height = 0;
+
+    if (doom_patch_size(luaL_checkstring(L, 1), &width, &height) == false) {
+        lua_pushnil(L);
+        lua_pushstring(L, doom_error());
+        return 2;
+    }
+    lua_pushinteger(L, width);
+    lua_pushinteger(L, height);
+    return 2;
+}
+
+static int doom_l_patch(lua_State *L)
+{
+    const char *lump = luaL_checkstring(L, 1);
+    int x = (int)luaL_checkinteger(L, 2);
+    int y = (int)luaL_checkinteger(L, 3);
+
+    if (doom_draw_patch(lump, gfx_backbuffer(), x, y) == false) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, doom_error());
+        return 2;
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+static const luaL_Reg doom_functions[] = {
+    { "open", doom_l_open },
+    { "lumps", doom_l_lumps },
+    { "palettes", doom_l_palettes },
+    { "palette", doom_l_palette },
+    { "color", doom_l_color },
+    { "size", doom_l_size },
+    { "patch", doom_l_patch },
+    { 0, 0 },
+};
+
+static void register_doom(lua_State *L)
+{
+    lua_newtable(L);
+    luaL_setfuncs(L, doom_functions, 0);
+    lua_setglobal(L, "doom");
+}
+
+/* Painting hooks, so a script can queue a patch in the frame's display list
+ * instead of drawing into the back buffer behind the compositor's back. */
+static int doom_l_draw_patch(lua_State *L)
+{
+    struct lua_host *host = (struct lua_host *)lua_touserdata(L, lua_upvalueindex(1));
+    const char *lump = luaL_checkstring(L, 1);
+    int x = (int)luaL_checkinteger(L, 2);
+    int y = (int)luaL_checkinteger(L, 3);
+
+    if (host == 0) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    draw_push(host, 6U, x, y, 0, 0, 0, 0, lump);
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+static int doom_l_draw_scaled(lua_State *L)
+{
+    struct lua_host *host = (struct lua_host *)lua_touserdata(L, lua_upvalueindex(1));
+    const char *lump = luaL_checkstring(L, 1);
+    int x = (int)luaL_checkinteger(L, 2);
+    int y = (int)luaL_checkinteger(L, 3);
+    int width = (int)luaL_checkinteger(L, 4);
+
+    if (host == 0) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    draw_push(host, 7U, x, y, width, 0, 0, 0, lump);
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+static const luaL_Reg doom_paint_functions[] = {
+    { "drawpatch", doom_l_draw_patch },
+    { "drawscaled", doom_l_draw_scaled },
+    { 0, 0 },
+};
+
+static void register_doom_paint(lua_State *L, struct lua_host *host)
+{
+    lua_newtable(L);
+    lua_pushlightuserdata(L, host);
+    luaL_setfuncs(L, doom_paint_functions, 1);
+    lua_setglobal(L, "doompaint");
+}
 
 /* ------------------------------------------------------------ allocator ---- */
 
@@ -302,6 +461,22 @@ static int host_print(lua_State *L)
 }
 
 /* Builds the ctx table for one host and stores it in the registry. */
+static int host_width(lua_State *L)
+{
+    struct lua_host *host = (struct lua_host *)lua_touserdata(L, lua_upvalueindex(1));
+
+    lua_pushinteger(L, host != 0 ? host->width : 0);
+    return 1;
+}
+
+static int host_height(lua_State *L)
+{
+    struct lua_host *host = (struct lua_host *)lua_touserdata(L, lua_upvalueindex(1));
+
+    lua_pushinteger(L, host != 0 ? host->height : 0);
+    return 1;
+}
+
 static void register_ctx(lua_State *L, struct lua_host *host)
 {
     lua_newtable(L);
@@ -329,6 +504,14 @@ static void register_ctx(lua_State *L, struct lua_host *host)
     lua_pushlightuserdata(L, host);
     lua_pushcclosure(L, host_line, 1);
     lua_setfield(L, -2, "line");
+
+    lua_pushlightuserdata(L, host);
+    lua_pushcclosure(L, host_width, 1);
+    lua_setfield(L, -2, "width");
+
+    lua_pushlightuserdata(L, host);
+    lua_pushcclosure(L, host_height, 1);
+    lua_setfield(L, -2, "height");
 
     lua_pushlightuserdata(L, host);
     lua_pushcclosure(L, host_mouse_x, 1);
@@ -502,6 +685,8 @@ struct lua_host *lua_host_load(const char *name, const char *source, int length,
     lua_pushcfunction(L, host_print);
     lua_setglobal(L, "print");
     register_ctx(L, host);
+    register_doom(L);
+    register_doom_paint(L, host);
 
     (void)base;
     if (luaL_loadbuffer(L, source, (size_t)length, name) != LUA_OK) {
@@ -700,6 +885,8 @@ void lua_host_draw(struct lua_host *host, struct gfx_surface *surface, int x,
     if (host == 0 || host->used == false) {
         return;
     }
+    host->width = width;
+    host->height = height;
     for (int index = 0; index < host->draw_count; ++index) {
         const struct lua_draw *cmd = &host->draw[index];
         int left = x + cmd->a;
@@ -722,12 +909,18 @@ void lua_host_draw(struct lua_host *host, struct gfx_surface *surface, int x,
         case 5:
             gfx_horizontal_line(surface, left, top, cmd->c, cmd->colour);
             break;
+        case 6:
+            /* a decoded WAD patch, at native size */
+            (void)doom_draw_patch(cmd->text, surface, left, top);
+            break;
+        case 7:
+            /* a decoded WAD patch, scaled to `c` pixels wide */
+            (void)doom_draw_picture_scaled(cmd->text, surface, left, top, cmd->c);
+            break;
         default:
             break;
         }
     }
-    (void)width;
-    (void)height;
 }
 
 bool lua_host_run_once(const char *name, const char *source, int length,

@@ -4,8 +4,16 @@ NASM ?= nasm
 GRUB_MKRESCUE ?= grub-mkrescue
 QEMU ?= qemu-system-x86_64
 
+
 TARGET := klye.iso
 BUILD_DIR := build
+
+# Where the disk image's contents come from.  Drop files in here and run
+# "make disk"; the image is a separate IDE disk the kernel reads at boot.
+# This has to come after BUILD_DIR, since := expands immediately.
+DISK_DIR ?= disk
+DISK_IMAGE := $(BUILD_DIR)/klye.img
+DISK_SIZE_MIB ?= 32
 ISO_DIR := $(BUILD_DIR)/isodir
 KERNEL := $(BUILD_DIR)/klye.elf
 
@@ -27,7 +35,7 @@ ROOTFS := rootfs
 TOOLS := $(BUILD_DIR)/tools
 VFS_IMAGE := $(BUILD_DIR)/vfs_image.c
 
-C_SOURCES := kernel.c scheduler.c mem.c heap.c libc.c gfx.c font.c input.c vfs.c launcher.c kby.c kas.c apps.c shell.c wm.c gui.c lua_host.c ata.c blob.c mmu.c wad.c
+C_SOURCES := kernel.c scheduler.c mem.c heap.c libc.c gfx.c font.c input.c vfs.c launcher.c kby.c kas.c apps.c shell.c wm.c gui.c lua_host.c ata.c blob.c mmu.c wad.c doom.c
 ASM_SOURCES := interrupts.S context.S fpu.S setjmp.S
 
 # Lua 5.4.7 core plus the base/string/table/math/utf8 libraries.  The io, os,
@@ -49,7 +57,7 @@ OBJECTS := $(addprefix $(BUILD_DIR)/,$(C_SOURCES:.c=.o)) $(LUA_OBJECTS) \
            $(BUILD_DIR)/vfs_image.o \
            $(BUILD_DIR)/boot.o
 
-.PHONY: all iso run clean tools rootfs
+.PHONY: all iso run run-nodisk disk clean tools rootfs
 
 all: $(TARGET)
 
@@ -95,10 +103,21 @@ LUA_BIN_SCRIPTS := $(patsubst %,$(ROOTFS)/bin/%,$(shell $(call launcher_entries,
 # Only emit a staging rule for launchers whose source actually lives in
 # home/klye/lua.  A script dropped straight into /bin, or kept somewhere else,
 # would otherwise make make fail looking for a prerequisite that is not there.
+# Only stage the scripts that really live under home/klye/lua.  A launcher
+# whose script was dropped straight into /bin has no source to copy from, and
+# naming it as a prerequisite would make make fail looking for a file that is
+# not there.
+#
+# This is a static pattern rule rather than a generated one on purpose: a rule
+# written as "target: prereq ; recipe" through $(eval) has no recipe at all,
+# because make only accepts a tab-indented line as one, so make reported the
+# target as up to date and never copied anything.
 LUA_STAGE_SRC := $(foreach f,$(patsubst $(ROOTFS)/bin/%,%,$(LUA_BIN_SCRIPTS)),\
                    $(wildcard $(ROOTFS)/home/klye/lua/$(f)))
-$(foreach src,$(LUA_STAGE_SRC),\
-  $(eval $(ROOTFS)/bin/$(notdir $(src)): $(src) ; $$(cp $$< $$@)))
+LUA_STAGE_FILES := $(patsubst $(ROOTFS)/home/klye/lua/%,$(ROOTFS)/bin/%,$(LUA_STAGE_SRC))
+
+$(LUA_STAGE_FILES): $(ROOTFS)/bin/%.lua: $(ROOTFS)/home/klye/lua/%.lua
+	cp $< $@
 
 $(VFS_IMAGE): $(BUILD_DIR)/mkvfs $(KBY_BINARIES) $(LUA_BIN_SCRIPTS) \
              $(shell find $(ROOTFS) -type f ! -name '*.kby' 2>/dev/null)
@@ -133,7 +152,18 @@ $(TARGET): $(KERNEL) grub/grub.cfg | $(ISO_DIR)/boot/grub
 	cp grub/grub.cfg $(ISO_DIR)/boot/grub/grub.cfg
 	$(GRUB_MKRESCUE) -o $@ $(ISO_DIR)
 
+# Build the disk image from $(DISK_DIR).  This is what carries DOOM1.WAD, which
+# is far too large to live in the ISO's built-in filesystem.
+disk:
+	@mkdir -p $(BUILD_DIR)
+	python3 tools/mkdisk.py $(DISK_DIR) $(DISK_IMAGE) $(DISK_SIZE_MIB)
+
 run: $(TARGET)
+	$(QEMU) -cdrom $(TARGET) -m 512M \
+	  -drive file=$(DISK_IMAGE),format=raw,if=ide,index=0,media=disk
+
+# Run with no disk at all, for when you are not testing disk-backed features.
+run-nodisk: $(TARGET)
 	$(QEMU) -cdrom $(TARGET) -m 512M
 
 clean:
