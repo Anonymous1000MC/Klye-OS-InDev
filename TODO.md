@@ -33,8 +33,12 @@ Ordered so each blocker sits above whatever depends on it.
       write, so files have real paths
 - [ ] Larger VFS capacity: more nodes, more blocks, and much bigger files
 - [ ] Full PMM: guard pages, demand paging, DMA-capable physical mappings
-- [ ] Point `kpm install` at the FAT16 write path, so an installed app survives
-      a reboot for real rather than just being possible
+- [ ] Persist user data to the FAT16 data partition: config, and game state.
+      Not `kpm install`: a live system's root is the RAM VFS, so an installed
+      app has nowhere to live, and the FAT volume is a data volume rather than a
+      system one. What needs it is anything that should outlive a session, which
+      is the settings app, a Doom high score table, and Lua apps saving state.
+      The write path is implemented already and only needs a caller.
 - [ ] Userspace and ring 3, so Lua apps stop running in ring 0
 - [ ] Doom sprites are not pixel exact: a post length byte does not match the
       pixels that follow it, and a k+2 fudge renders a stretched but
@@ -43,7 +47,8 @@ Ordered so each blocker sits above whatever depends on it.
 
 ## Later
 
-- [ ] Boot a real DOOM WAD, to drive the VFS, PMM, and MMU work
+- [x] Boot the real DOOM WAD: the title screen renders from it, read out of
+      FAT16
 - [ ] PCI enumeration, BAR mapping, DMA-capable physical mappings
 - [ ] VIRTIO-GPU with virgl for accelerated 3D
 
