@@ -19,6 +19,8 @@
 #include "font.h"
 #include "gfx.h"
 #include "doom.h"
+#include "doom3d.h"
+#include "doom_level.h"
 #include "heap.h"
 #include "lua_host.h"
 #include "theme.h"
@@ -68,6 +70,10 @@ struct lua_host {
     uint32_t keys[LUA_KEYS];
     int key_head;
     int key_tail;
+    /* Which keys are down right now.  The key queue only ever sees presses,
+     * because that is all a one shot script needs, but anything that moves
+     * continuously has to be able to ask whether a key is still held. */
+    bool held[256];
     uint32_t frame;
     /* the client area size, refreshed when the compositor replays this host's
      * draw list.  A script cannot otherwise know how big its window is, and
@@ -235,6 +241,124 @@ static void register_doom_paint(lua_State *L, struct lua_host *host)
     lua_pushlightuserdata(L, host);
     luaL_setfuncs(L, doom_paint_functions, 1);
     lua_setglobal(L, "doompaint");
+}
+
+/* ------------------------------------------------------------- doom3d -----
+ *
+ * The 3D view, which needs no textures and so works on any WAD.  It draws into
+ * the backbuffer, so a script renders a view and the compositor presents it
+ * like anything else.
+ */
+
+static int doom3d_l_level(lua_State *L)
+{
+    const char *marker = luaL_checkstring(L, 1);
+
+    /* A different level means different geometry, so anything already built
+     * has to be dropped or the old level keeps rendering. */
+    doom3d_reset();
+    if (doom_level_load(marker) == false) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, doom_level_error());
+        return 2;
+    }
+    if (doom3d_prepare() == false) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, doom3d_error());
+        return 2;
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+static int doom3d_l_view(lua_State *L)
+{
+    doom3d_set_view((int32_t)luaL_checkinteger(L, 1),
+                    (int32_t)luaL_checkinteger(L, 2),
+                    (int32_t)luaL_checkinteger(L, 3),
+                    (int32_t)luaL_optinteger(L, 4, 0));
+    return 0;
+}
+
+static int doom3d_l_turn(lua_State *L)
+{
+    int32_t by = (int32_t)luaL_checkinteger(L, 1);
+
+    doom3d_turn(by);
+    return 0;
+}
+
+static int doom3d_l_move(lua_State *L)
+{
+    doom3d_step((int32_t)luaL_checkinteger(L, 1),
+                (int32_t)luaL_checkinteger(L, 2));
+    return 0;
+}
+
+static int doom3d_l_walk(lua_State *L)
+{
+    doom3d_walk((int32_t)luaL_checkinteger(L, 1));
+    return 0;
+}
+
+static int doom3d_l_where(lua_State *L)
+{
+    int32_t x;
+    int32_t y;
+    int32_t angle;
+    int32_t floor;
+
+    doom3d_get_view(&x, &y, &angle, &floor);
+    lua_pushinteger(L, x);
+    lua_pushinteger(L, y);
+    lua_pushinteger(L, angle);
+    lua_pushinteger(L, floor);
+    return 4;
+}
+
+static int doom3d_l_render(lua_State *L)
+{
+    struct lua_host *host =
+        (struct lua_host *)lua_touserdata(L, lua_upvalueindex(1));
+    uint32_t void_color = (uint32_t)luaL_optinteger(L, 1, 0xFF000000U);
+    int32_t x;
+    int32_t y;
+    int32_t angle;
+    int32_t floor;
+
+    if (host == 0) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    doom3d_get_view(&x, &y, &angle, &floor);
+    /* The viewer state goes into the command, because the compositor compares
+     * each frame's list with the last one and skips a redraw when they match.
+     * A command with nothing in it but a constant would look identical every
+     * frame, and turning on the spot would show a frozen room. */
+    draw_push(host, 8U, 0, 0, 0, 0, angle, void_color, 0);
+    host->draw[host->draw_count - 1U].d = floor;
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+/* render takes the host as an upvalue; the rest ignore it. */
+static const luaL_Reg doom3d_functions[] = {
+    { "level", doom3d_l_level },
+    { "view", doom3d_l_view },
+    { "turn", doom3d_l_turn },
+    { "move", doom3d_l_move },
+    { "walk", doom3d_l_walk },
+    { "where", doom3d_l_where },
+    { "render", doom3d_l_render },
+    { 0, 0 },
+};
+
+static void register_doom3d(lua_State *L, struct lua_host *host)
+{
+    lua_newtable(L);
+    lua_pushlightuserdata(L, host);
+    luaL_setfuncs(L, doom3d_functions, 1);
+    lua_setglobal(L, "doom3d");
 }
 
 /* ------------------------------------------------------------ allocator ---- */
@@ -419,6 +543,15 @@ static int host_mouse_down(lua_State *L)
     return 1;
 }
 
+static int host_key_held(lua_State *L)
+{
+    struct lua_host *host = (struct lua_host *)lua_touserdata(L, lua_upvalueindex(1));
+    int code = (int)luaL_checkinteger(L, 1);
+
+    lua_pushboolean(L, (code >= 0 && code < 256) ? host->held[code] : false);
+    return 1;
+}
+
 static int host_key(lua_State *L)
 {
     struct lua_host *host = (struct lua_host *)lua_touserdata(L, lua_upvalueindex(1));
@@ -531,6 +664,10 @@ static void register_ctx(lua_State *L, struct lua_host *host)
     lua_pushlightuserdata(L, host);
     lua_pushcclosure(L, host_mouse_down, 1);
     lua_setfield(L, -2, "mouse_down");
+
+    lua_pushlightuserdata(L, host);
+    lua_pushcclosure(L, host_key_held, 1);
+    lua_setfield(L, -2, "key_held");
 
     lua_pushlightuserdata(L, host);
     lua_pushcclosure(L, host_key, 1);
@@ -694,6 +831,7 @@ struct lua_host *lua_host_load(const char *name, const char *source, int length,
     register_ctx(L, host);
     register_doom(L);
     register_doom_paint(L, host);
+    register_doom3d(L, host);
 
     (void)base;
     if (luaL_loadbuffer(L, source, (size_t)length, name) != LUA_OK) {
@@ -810,7 +948,13 @@ void lua_host_push_key(struct lua_host *host, uint32_t code, bool pressed)
 {
     int next;
 
-    if (host == 0 || pressed == false) {
+    if (host == 0) {
+        return;
+    }
+    if (code < 256U) {
+        host->held[code] = pressed;
+    }
+    if (pressed == false) {
         return;
     }
     next = (host->key_tail + 1) % LUA_KEYS;
@@ -963,6 +1107,12 @@ void lua_host_draw(struct lua_host *host, struct gfx_surface *surface, int x,
         case 7:
             /* a decoded WAD patch, scaled to `c` pixels wide */
             (void)doom_draw_picture_scaled(cmd->text, surface, left, top, cmd->c);
+            break;
+        case 8:
+            /* the 3D view, into the whole of this window.  The viewer state is
+             * already in the command; the renderer keeps its own, so all this
+             * has to do is hand it the rectangle. */
+            (void)doom3d_render(surface, x, y, width, height, cmd->colour, 0);
             break;
         default:
             break;
