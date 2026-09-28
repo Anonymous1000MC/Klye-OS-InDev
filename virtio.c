@@ -65,7 +65,8 @@ bool virtio_setup(struct virtio_device *d)
     size_t desc_bytes;
     size_t avail_bytes;
     size_t used_bytes;
-    size_t total;
+    size_t ring_bytes;
+    size_t need;
     uint8_t *base;
 
     error_text[0] = 0;
@@ -126,46 +127,46 @@ bool virtio_setup(struct virtio_device *d)
     desc_bytes = (size_t)queue_size * 16U;
     avail_bytes = 2U + (size_t)queue_size * 2U;
     used_bytes = 2U + (size_t)queue_size * 8U;
-    total = align4096(desc_bytes) + align4096(avail_bytes) + align4096(used_bytes);
-    /* The device is told where the ring is as a physical address, and it
-     * reads it with no translation of its own.  A heap pointer is a virtual
-     * address, and the two are the same only while memory happens to be
-     * identity mapped, which is not something a driver gets to assume: the
-     * mapping window exists precisely because the two come apart.  So the ring
-     * is taken from the window, and the address handed over is the physical
-     * one the window maps, not the virtual one it was allocated at. */
-    /* One allocation holds the ring, the request header and the data buffer.
-     * All three have to be reachable by the device, and the only address this
-     * can be certain of is the physical one the mapping window reports for
-     * the start of its own allocation.  A virtual address anywhere else in
-     * the kernel is a different question: boot code identity maps the low
-     * memory, so a static variable's virtual address is usually also its
-     * physical one, and "usually" is doing a lot of work there. */
-    total = align4096(total) + VIRTIO_BLK_SECTOR_BYTES;
-    base = heap_calloc(1, total);
+    /* The ring is three page aligned parts, and the request header and the
+     * data buffer go immediately after it in the same allocation, so that one
+     * address covers everything the device has to reach.
+     *
+     * The three sizes are worked out before anything is allocated.  Adding the
+     * extra bytes first and aligning afterwards looks like the same sum and is
+     * not: aligning a total that already includes the sector rounds the whole
+     * thing up, so the offset for the data lands past the end of what was
+     * allocated, and the request writes into the heap beyond its own block.
+     * That is not a wrong answer, it is a corrupted heap. */
+    ring_bytes = align4096(desc_bytes) + align4096(avail_bytes) +
+                 align4096(used_bytes);
+    need = ring_bytes + sizeof(struct virtio_blk_request) +
+           VIRTIO_BLK_SECTOR_BYTES;
+    base = heap_calloc(1, need + 4096U);
     if (base == 0) {
         fail("out of memory for the queue rings");
         return false;
     }
-    /* The address handed to the device is the address the CPU writes through,
-     * which is only correct because boot code identity maps the heap.  Taking
-     * the rings from the mapping window and translating instead was tried and
-     * the request stopped completing, which says vm_to_physical is not yet
-     * trustworthy for a window address.  The dependency is real and it is the
-     * DMA capable mapping item: this driver needs the heap to be identity
-     * mapped, and nothing here checks that it is. */
-    d->data_offset = align4096(total) - VIRTIO_BLK_SECTOR_BYTES;
+    /* rounded up to a page, because the device is given a page number and an
+     * unaligned one names a page that starts mid-page */
+    base = (uint8_t *)(((uintptr_t)base + 4095U) & ~(uintptr_t)4095U);
+    d->physical = (uint64_t)(uintptr_t)base;
     d->ring = (void *)base;
     d->ring_virtual = (uint64_t)(uintptr_t)base;
-    d->ring_bytes = (uint32_t)(total + 4096U);
-    /* the frame number is of the start, so the start must be on a boundary */
-    base = (uint8_t *)(((uintptr_t)base + 4095U) & ~(uintptr_t)4095U);
-    /* after rounding up, because the device is given a page number and an
-     * unaligned one addresses a different page entirely */
-    d->physical = (uint64_t)(uintptr_t)base;
+    d->ring_bytes = (uint32_t)(need + 4096U);
+    d->request_offset = (uint32_t)ring_bytes;
+    d->data_offset = (uint32_t)(ring_bytes +
+                                sizeof(struct virtio_blk_request));
+
+    /* The address handed to the device is the address the CPU writes through.
+     * That is only correct while the heap is identity mapped, and it is not:
+     * the heap sits in the high half, so a heap pointer is not a physical
+     * address.  Taking the rings from the mapping window and translating with
+     * vm_to_physical was tried, gave a plausible frame number, and the request
+     * still did not complete, so that is not trustworthy either.  This is the
+     * DMA capable mapping item, and it is a real blocker rather than a tidy
+     * one, and nothing here checks for it. */
     d->queue[0].desc = (struct virtio_desc *)base;
-    d->queue[0].avail =
-        (struct virtio_avail *)(base + align4096(desc_bytes));
+    d->queue[0].avail = (struct virtio_avail *)(base + align4096(desc_bytes));
     d->queue[0].used = (struct virtio_used *)(base + align4096(desc_bytes) +
                                              align4096(avail_bytes));
     d->queue[0].avail->flags = 1U;
@@ -176,7 +177,7 @@ bool virtio_setup(struct virtio_device *d)
     d->queue[0].last_used = 0U;
     d->queue[0].ready = true;
 
-    d->queue[0].pfn = (uint32_t)(vm_to_physical((uint64_t)(uintptr_t)base) >> 12);
+    d->queue[0].pfn = (uint32_t)(d->physical >> 12);
 
     outl((uint16_t)(d->io + VIRTIO_LEGACY_QUEUE_PFN), d->queue[0].pfn);
     outb((uint16_t)(d->io + VIRTIO_LEGACY_STATUS),
@@ -249,7 +250,7 @@ int virtio_blk_read(struct virtio_device *d, uint64_t sector, uint8_t *buffer)
     {
         struct virtio_blk_request *request =
             (struct virtio_blk_request *)(void *)(uintptr_t)
-                (d->ring_virtual + d->data_offset);
+                (d->ring_virtual + d->request_offset);
 
         request->type = VIRTIO_BLK_IN;
         request->reserved = 0U;
@@ -258,8 +259,7 @@ int virtio_blk_read(struct virtio_device *d, uint64_t sector, uint8_t *buffer)
     head = (uint16_t)(queue->avail->index % queue->size);
     /* the request header, immediately before the data, both inside the ring
      * allocation so one address covers the lot */
-    queue->desc[0].address = d->physical + d->data_offset -
-                             sizeof(struct virtio_blk_request);
+    queue->desc[0].address = d->physical + d->request_offset;
     queue->desc[0].length = (uint32_t)sizeof(d->request);
     queue->desc[0].flags = VIRTIO_DESC_NEXT;
     queue->desc[0].next = 1U;

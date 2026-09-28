@@ -113,6 +113,7 @@ struct virtio_device {
     struct virtio_blk_request request;
     uint64_t ring_virtual;   /* the window allocation, as the CPU sees it */
     uint64_t physical;       /* and where that is in the machine */
+    uint32_t request_offset; /* the request header's offset into it */
     uint32_t data_offset;    /* and the data buffer's */  /* the header in front of a transfer */
     uint32_t ring_bytes;          /* the contiguous ring allocation */
     void *ring;
