@@ -13,11 +13,7 @@ Last updated: ring 3 scheduler work, HEAD 9349ed6 + uncommitted scheduler fix.
 - Program and stack allocated from vm_user_alloc_pages.
 
 ## Known broken
-- Only the FIRST of the test program's two writes runs. The second syscall is
-  never reached. Verified: handler reports ret-rip = base+30 for a syscall at
-  base+28, so the return address is right, and the sysretq R11 packing
-  (CS<<48 | SS<<32 | flags) is verified correct by hand. Cause not established.
-- exit is therefore never reached either.
+- (none in the ring 3 path: both writes and exit now run)
 - GDB against the live guest is unreliable: `gdb()` in tools/qemu_harness.py
   prepends `print ` to every -ex, so `b *addr` and `x/4i` run as print
   statements and silently do nothing. Use a hand-built gdb argv. Even then the
@@ -28,7 +24,7 @@ Last updated: ring 3 scheduler work, HEAD 9349ed6 + uncommitted scheduler fix.
 - No ELF loader yet.
 
 ## Next
-1. Find why the second syscall is missed (instrument, do not use the harness gdb).
-2. Linux syscall set that libc needs at startup.
-3. ELF loader: ELF64 headers, PT_LOAD mapping, relocations, TLS via fs base.
-4. Static musl or dietlibc binary, then PT_INTERP.
+1. Linux syscall set that libc needs at startup (arch_prctl, set_tid_address,
+   brk, rt_sigaction, futex, getrandom, mmap, openat).
+2. ELF loader: ELF64 headers, PT_LOAD mapping, relocations, TLS via fs base.
+3. Static musl or dietlibc binary, then PT_INTERP.

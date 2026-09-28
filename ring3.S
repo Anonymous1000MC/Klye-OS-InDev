@@ -36,10 +36,6 @@ user_syscall_rflags:
 .globl user_syscall_stack
 user_syscall_stack:
     .quad 0
-/* Trace only: the packed selectors and flags, for serial_trace_sysret. */
-.globl user_syscall_r11
-user_syscall_r11:
-    .quad 0
 
 /* The kernel stack a syscall runs on, at a fixed address so the stub can
  * reach it without needing any data of its own to find it. */
@@ -249,7 +245,6 @@ syscall_return:
     movq %rax, %ds
     movq %rax, %es
     call serial_marker_ptr_return
-    call serial_trace_a
 
     /* Hand the data selectors back before dropping privilege, so the program
      * does not find the kernel's descriptors loaded when it resumes.  A data
@@ -267,39 +262,29 @@ syscall_return:
     movq user_syscall_stack(%rip), %rbx
     movq user_syscall_rip(%rip), %rcx
     movq user_syscall_rflags(%rip), %r11
-    /* Write the port directly: a C call here has to be trusted to survive
-     * whatever %rsp and the selectors are holding, and if it does not the
-     * only evidence is the absence of a line. */
-    movw $0x3F8, %dx
-    movb $0x2A, %al
-    outb %al, %dx
-    movb $0x0A, %al
-    outb %al, %dx
     movq %rbx, %rsp
-    /* sysretq takes its return selectors from STAR by adding 16 and 8 to one
-     * field, and that field has to be a ring 0 selector for the syscall to
-     * have been able to enter at all.  So the selectors sysretq is about to
-     * load are the right descriptors at the wrong privilege: CS 0x20 and SS
-     * 0x18, both ring 0.  Loading those as a ring 3 program would fault on the
-     * first access, and a fault here has nowhere to be reported from.
+    /* sysretq takes its instruction pointer from rcx and both selectors plus
+     * the flags from r11: CS in bits 63:48, SS in 47:32, RFLAGS in the low
+     * half.  The two selectors in STAR cannot supply that, because the field
+     * sysretq derives them from has to be a ring 0 value for the syscall to
+     * have been able to enter at all, so the ring 3 pair is built here.
      *
-     * R11 has to arrive holding three fields, in this order from the top: the
-     * code selector in bits 63:48, the stack selector in 47:32, and the flags
-     * in the low half.  Building it by shifting the selectors into place in
-     * the wrong sequence is easy to do and fails quietly -- sysretq loads
-     * whatever lands in those fields, so a code selector of zero and a stack
-     * selector of 0x1B with the flags pushed up next to it return to address
-     * zero in ring 0, which looks like a program that simply stopped. */
+     * CS into bits 63:48 needs a 48 bit shift, not 16.  With 16 the code
+     * selector lands at bit 32, bits 63:48 stay zero, and sysretq is handed a
+     * null code selector -- which it rejects without raising anything, so the
+     * program stops between one write and the next with no fault and no panic.
+     * That is precisely the symptom this had, and it survived a hand check of
+     * the arithmetic because 0x00000023001B0002 still looks reasonable read
+     * from the wrong end of the register. */
+    /* rcx cannot be the scratch here: it already holds the address sysretq is
+     * about to jump to, and overwriting it is how the return ended up at
+     * 0x1B00000000 -- the stack selector executed as code, with no fault until
+     * the fetch. */
     movq $0x23, %rax
-    shlq $16, %rax
-    orq $0x1B, %rax
-    shlq $16, %rax
+    shlq $48, %rax
+    movq $0x1B, %rbx
+    shlq $32, %rbx
+    orq %rbx, %rax
     orq %r11, %rax
     movq %rax, %r11
-    /* TRACE: stash r11 so the tracer can read it, then restore rcx, which the
-     * call is free to destroy. */
-    movq %r11, user_syscall_r11(%rip)
-    movq %rcx, %rdi
-    call serial_trace_sysret
-    movq user_syscall_rip(%rip), %rcx
     sysretq

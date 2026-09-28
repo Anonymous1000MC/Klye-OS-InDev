@@ -4,28 +4,28 @@
 - iretq ring 0 -> ring 3, user-only page range, SYSCALL entry/handler/return.
 - write and exit handled. Program runs as a real scheduler task, survives ticks.
 - usertest does not reboot any more (5f2bf60).
+- BOTH writes and exit now run. The ring 3 path is complete for what it covers.
 
-## The open bug: second syscall never runs
+## The bug that was actually there, and why it hid so well
+Two mistakes in the same six instructions, one after the other:
 
-The test program makes two writes then exit. Only the first write appears.
-Not a reboot, not a panic, not a fault: the task is alive and the log just
-stops. `exit` is never reached either.
+1. The code selector was shifted into r11 with `shl $16` twice, which puts it
+   at bit 32 instead of bit 48. Bits 63:48 stayed zero, so sysretq was handed a
+   NULL code selector. It rejects that without raising anything: no fault, no
+   panic, the task just stops. And 0x00000023001B0002 still looks like a
+   plausible register read from the wrong end, so a hand check passed it.
+   Fixed: `shl $48`, giving 0x0023001B00000002.
 
-### Ruled out, with the value that ruled it out
-- Sysretq input is CORRECT. Traced immediately before the instruction:
-    rcx = 1099511627806 = image base + 30   (syscall is at base + 28)  ok
-    r11 = 150325625346   = 0x23001B00000002 = CS 0x23 | SS 0x1B | FLAGS 2  ok
-    rsp = 1099511640040  = inside the user stack                          ok
-  So the return address, the selector packing and the stack are all right.
-- The image copy is right: user_test_entry is 0x1C into the blob, the
-  messages are at +0x55 and +0x6F, and the handler reported rsi = base+0x55
-  with rdx = 26 for the first message, the exact length.
-- The handler is reached exactly once. user_syscall_count is the only evidence
-  and it is static, so read it through a function, not by symbol.
+2. Fixing that exposed the next one immediately. The scratch register used to
+   build the stack selector was rcx -- which is where the return address lives.
+   The program therefore jumped to 0x1B00000000, the stack selector executed as
+   an instruction pointer. It faulted cleanly this time (error 4, protection,
+   cs 0x23), which is what made it findable. Fixed: scratch in rbx.
 
-### NOT ruled out
-- What the program actually executes after the first return. Never observed.
-  This is the thing to look at next.
+The lesson worth keeping: the first version failed *silently*, so nothing in the
+kernel could report it. Every silent failure here had the same shape -- a value
+that looked right because it was checked from the wrong end, or checked before
+it was set. A fault is worth a lot more than a hang.
 
 ## Tooling traps in this repo (cost real time, all avoidable)
 1. tools/qemu_harness.py `gdb()` prepends `print ` to every -ex. So `b *addr`,

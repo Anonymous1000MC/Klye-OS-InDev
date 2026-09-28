@@ -72,25 +72,6 @@ void serial_marker(const char *text)
 #define MARK(name, text)                              \
     void name(void) { serial_marker(text); }
 
-/* Report the three values sysretq is about to act on.  It takes its
- * instruction pointer from rcx and both selectors plus the flags from r11, and
- * if any of them is wrong the processor goes somewhere else without saying so,
- * so the only place they can be checked is here. */
-void serial_trace_sysret(uint64_t rcx)
-{
-    extern volatile uint64_t user_syscall_r11;
-    serial_write("  [sysret] rcx ");
-    serial_write_decimal(rcx);
-    serial_write(" r11 ");
-    serial_write_decimal(user_syscall_r11);
-    serial_write(" rsp ");
-    serial_write_decimal((uint64_t)(uintptr_t)&rcx);
-    serial_putc('\n');
-}
-
-void serial_trace_a(void){serial_marker("  [t] selectors set to user ds/es");}
-void serial_trace_b(void){serial_marker("  [t] about to build r11");}
-
 MARK(serial_marker_ptr_enter, "r3: user_enter, about to iretq into ring 3");
 MARK(serial_marker_ptr_in_kernel, "r3: now in ring 0 after lretq");
 MARK(serial_marker_ptr_return, "r3: returning to ring 3");
