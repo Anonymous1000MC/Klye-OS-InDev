@@ -908,9 +908,12 @@ void kernel_main(uint64_t framebuffer_address, uint32_t pitch,
 
     if (vfs_mount() && vfs_mounted()) {
         post("VIRTUAL FILESYSTEM", "OK");
-        post_number("  ",
-                    (uint32_t)VFS_TOTAL_BLOCKS * (uint32_t)VFS_BLOCK_SIZE,
+        /* the real size, not the ceiling: a small guest gets a smaller
+         * filesystem, and reporting the ceiling there would be a lie */
+        post_number("  ", vfs_bytes_total(),
                     " bytes in-memory storage\n");
+        post_number("  ", (uint32_t)vfs_bytes_used(), " in use, ");
+        post_number("", (uint32_t)vfs_node_capacity(), " node slots\n");
     } else {
         post("VIRTUAL FILESYSTEM", "MISSING");
     }

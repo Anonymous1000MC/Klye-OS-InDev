@@ -1878,6 +1878,7 @@ static bool kpm_stem(const char *name, const char *suffix, char *out, int max)
 {
     int stem = text_length(name);
     int cut = text_length(suffix);
+    int start = 0;
 
     if (stem <= cut) {
         return false;
@@ -1888,11 +1889,22 @@ static bool kpm_stem(const char *name, const char *suffix, char *out, int max)
         }
     }
     stem -= cut;
+    /* Only the last path component is the program's name.  Keeping the
+     * directory turns "kpm build lua/clock.lua" into an install to
+     * /bin/lua/clock.lua, whose parent does not exist, so the write fails for
+     * every script that has a directory in its name.  That is all of them:
+     * the sources live in /home/klye/lua. */
+    for (int index = 0; index < stem; ++index) {
+        if (name[index] == '/') {
+            start = index + 1;
+        }
+    }
+    stem -= start;
     if (stem >= max) {
         stem = max - 1;
     }
     for (int index = 0; index < stem; ++index) {
-        out[index] = name[index];
+        out[index] = name[start + index];
     }
     out[stem] = 0;
     return true;

@@ -33,7 +33,8 @@ QMAP = {
     ' ': 'spc', '.': 'dot', ',': 'comma', '-': 'minus', '=': 'equal',
     '/': 'slash', '\\': 'backslash', ';': 'semicolon', "'": 'apostrophe',
     '[': 'bracket_left', ']': 'bracket_right', '`': 'grave_accent',
-    '\n': 'ret', ':': 'shift_semicolon',
+    '\n': 'ret', ':': 'shift_semicolon', '>': 'shift_dot',
+    '<': 'shift_comma', '|': 'shift_backslash', '?': 'shift_slash',
 }
 
 # QEMU qcodes are lower case for letters, so an upper case character has to be

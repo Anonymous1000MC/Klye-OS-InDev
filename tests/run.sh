@@ -75,6 +75,40 @@ else
     echo "skipping wad_test: no WAD at $WAD"
 fi
 
+# the filesystem.  The heap stub stands in for the real one, and the point is
+# the write path: every app in /bin is baked into the ISO, so the guest's own
+# kpm build was never exercised until something needed it to work.
+$cc $cflags -ffreestanding -c "$here/../vfs.c" -o "$out/vfs.o"
+$cc $cflags -c "$here/vfs_test.c" -o "$out/vfs_test.o"
+# the baked in image, when the build has produced one, so the test sees the
+# same filesystem the kernel boots with rather than a freshly seeded one
+vfs_image=""
+if [ -f "$here/../build/vfs_image.c" ]; then
+    $cc $cflags -c "$here/../build/vfs_image.c" -o "$out/vfs_image.o"
+    vfs_image="$out/vfs_image.o"
+fi
+$cc "$out/vfs.o" $vfs_image "$out/stubs.o" "$out/vfs_test.o" \
+    -o "$out/vfs_test" -lm
+if ! "$out/vfs_test"; then
+    echo "vfs_test FAILED"
+    status=1
+fi
+
+# the untextured 3D view, checked against a real level when one is available
+if [ -f "$WAD" ]; then
+    $cc $cflags -ffreestanding -c "$here/../doom_level.c" -o "$out/doom_level.o"
+    $cc $cflags -ffreestanding -c "$here/../doom3d.c" -o "$out/doom3d.o"
+    $cc $cflags -c "$here/doom3d_test.c" -o "$out/doom3d_test.o"
+    $cc "$out/wad.o" "$out/doom_level.o" "$out/doom3d.o" \
+        "$out/stubs.o" "$out/doom3d_test.o" -o "$out/doom3d_test" -lm
+    if ! "$out/doom3d_test" "$WAD"; then
+        echo "doom3d_test FAILED"
+        status=1
+    fi
+else
+    echo "skipping doom3d_test: no WAD at $WAD"
+fi
+
 # differential test against glibc; see the comment in fmt_diff.c for the two
 # known classes of disagreement and why the baseline is not zero
 $cc $cflags -c "$here/fmt_diff.c" -o "$out/fmt_diff.o"

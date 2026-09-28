@@ -55,7 +55,25 @@ a vanilla-format reading would give. Checked against the real file, not assumed.
       whole window, and a wide-copy present path
 - [x] FAT16 mounted on the ATA disk: directories, long filenames, read and
       write, so files have real paths
-- [ ] Larger VFS capacity: more nodes, more blocks, and much bigger files
+- [x] Larger VFS capacity: 4 MiB across 8192 blocks, 512 nodes and 256 KiB per
+      file, up from 160 KiB, 128 nodes and 12 KiB. The three tables were
+      static arrays in BSS, so growing them meant growing the kernel image by
+      megabytes before a single file existed; they now come from the MMU, which
+      maps the block store a frame at a time and does not need a physically
+      contiguous run. A guest too small for the full size gets a smaller
+      filesystem rather than a failed mount, and the boot log reports what was
+      actually allocated instead of the ceiling, which is how the original
+      160 KiB went unnoticed for so long.
+- [x] `kpm build` can install a script again. The stem was taken by stripping
+      the extension but keeping the directory, so `kpm build lua/clock.lua`
+      installed to `/bin/lua/clock.lua`, whose parent does not exist, and every
+      script with a directory in its name failed. All of them have one, because
+      the sources live in `/home/klye/lua`, so the command was unusable and
+      nothing had noticed: the apps in `/bin` are baked into the ISO by the
+      build system, so the guest's own build was never on a path that mattered.
+- [x] VFS host test. It had none, which is the other half of why the broken
+      write path survived: a filesystem with no tests, exercised only by an
+      image that is regenerated at build time.
 - [ ] Full PMM: guard pages, demand paging, DMA-capable physical mappings
 - [ ] Persist user data to the FAT16 data partition: config, and game state.
       Not `kpm install`: a live system's root is the RAM VFS, so an installed

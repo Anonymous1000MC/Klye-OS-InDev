@@ -4,6 +4,7 @@
 
 #include "kernel.h"
 #include "heap.h"
+#include "mmu.h"
 #include "vfs.h"
 
 struct vfs_node {
@@ -22,9 +23,23 @@ struct vfs_node {
     bool is_dir;
 };
 
-static struct vfs_node vfs_nodes[VFS_MAX_NODES];
-static uint8_t vfs_storage[VFS_TOTAL_BLOCKS][VFS_BLOCK_SIZE];
-static bool vfs_block_used[VFS_TOTAL_BLOCKS];
+/* The three tables live on the heap, sized at mount time.
+ *
+ * They were static arrays, which put the whole block store and the whole node
+ * table in BSS whether or not anything was stored.  Raising the caps to
+ * something usable then means the kernel image grows by megabytes before the
+ * first file exists, so the tables move to the heap and the caps become
+ * ceilings that a small guest can undershoot.
+ *
+ * vfs_storage is flat, block * VFS_BLOCK_SIZE + offset, rather than an array
+ * of arrays, so one allocation covers it.
+ */
+static uint8_t *vfs_storage;
+static uint8_t *vfs_block_used;   /* one byte per block, 0 free */
+static struct vfs_node *vfs_nodes;
+static int vfs_block_count;
+static int vfs_node_count;
+static bool vfs_storage_mapped;   /* storage came from the MMU, not the heap */
 static char vfs_scratch[VFS_BODY_MAX];
 static int vfs_used_nodes;
 static uint32_t vfs_used_blocks;
@@ -177,7 +192,7 @@ static void vfs_absolute(const char *path, const char *cwd, char *out, int max)
 
 static int vfs_alloc_node(void)
 {
-    for (int index = 0; index < VFS_MAX_NODES; ++index) {
+    for (int index = 0; index < vfs_node_count; ++index) {
         if (!vfs_nodes[index].used) {
             return index;
         }
@@ -202,7 +217,7 @@ static void vfs_unlink(int index)
     for (int slot = 0; slot < node->block_count; ++slot) {
         int block = node->blocks[slot];
 
-        if (block >= 0 && block < VFS_TOTAL_BLOCKS && vfs_block_used[block]) {
+        if (block >= 0 && block < vfs_block_count && vfs_block_used[block]) {
             vfs_block_used[block] = false;
             vfs_used_blocks--;
         }
@@ -308,7 +323,7 @@ static int vfs_walk(const char *absolute)
 
 static int vfs_block_alloc(void)
 {
-    for (int block = 0; block < VFS_TOTAL_BLOCKS; ++block) {
+    for (int block = 0; block < vfs_block_count; ++block) {
         if (!vfs_block_used[block]) {
             vfs_block_used[block] = true;
             vfs_used_blocks++;
@@ -325,8 +340,8 @@ static uint8_t *vfs_file_pointer(int index, uint32_t offset)
     if (slot >= vfs_nodes[index].block_count) {
         return 0;
     }
-    return &vfs_storage[vfs_nodes[index].blocks[slot]]
-                          [offset % VFS_BLOCK_SIZE];
+    return &vfs_storage[(size_t)vfs_nodes[index].blocks[slot] * VFS_BLOCK_SIZE +
+                        (offset % VFS_BLOCK_SIZE)];
 }
 
 static bool vfs_file_reserve(int index, uint32_t needed)
@@ -373,7 +388,7 @@ static void vfs_seed_directory(const char *path)
 
 void vfs_format(void)
 {
-    for (int index = 0; index < VFS_MAX_NODES; ++index) {
+    for (int index = 0; index < vfs_node_count; ++index) {
         vfs_nodes[index].used = false;
         vfs_nodes[index].first_child = -1;
         vfs_nodes[index].next_sibling = -1;
@@ -382,7 +397,7 @@ void vfs_format(void)
         vfs_nodes[index].block_count = 0;
         vfs_nodes[index].size = 0;
     }
-    for (int block = 0; block < VFS_TOTAL_BLOCKS; ++block) {
+    for (int block = 0; block < vfs_block_count; ++block) {
         vfs_block_used[block] = false;
     }
     vfs_used_nodes = 0;
@@ -480,8 +495,85 @@ static bool vfs_load_image(void)
     return true;
 }
 
+/* Allocate the three tables, halving the request until it fits.
+ *
+ * A guest with plenty of memory gets the full ceiling.  A small one gets a
+ * smaller filesystem rather than a failed mount, because a kernel that cannot
+ * mount its own root filesystem is worse off than one with a small root
+ * filesystem, and the block size and the on-disk format do not change.
+ *
+ * The big table goes through the MMU first, because it wants several megabytes
+ * and the heap can only serve a physically contiguous run, which on a real
+ * guest is often a megabyte or two once the kernel, the framebuffer and Lua
+ * have taken their share.  The MMU does not care: it maps one 4 KiB frame per
+ * page and hands back something that is virtually contiguous, which is all
+ * this ever needed.  Without it the filesystem silently comes up at a quarter
+ * of its size, and the boot log still says the ceiling, which is how the
+ * original 160 KiB went unnoticed.
+ *
+ * The largest free block is consulted before the heap fallback rather than
+ * after, because a failed attempt that has already taken the big table is the
+ * worst order: the storage succeeds, the next two fail, and the space is gone
+ * for a smaller attempt that would have fitted. */
+static bool vfs_alloc_tables(void)
+{
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        int blocks = VFS_TOTAL_BLOCKS >> attempt;
+        int nodes = VFS_MAX_NODES >> attempt;
+        size_t storage_bytes = (size_t)blocks * VFS_BLOCK_SIZE;
+        size_t needed = storage_bytes + (size_t)blocks +
+                        (size_t)nodes * sizeof(struct vfs_node);
+
+        if (blocks < 64 || nodes < 32) {
+            break;
+        }
+        if (attempt == 0) {
+            vfs_storage = vm_alloc_pages(storage_bytes);
+            if (vfs_storage != 0) {
+                vfs_storage_mapped = true;
+            }
+        }
+        if (vfs_storage == 0) {
+            if (heap_largest_block() < needed) {
+                continue;
+            }
+            vfs_storage = heap_malloc(storage_bytes);
+        }
+        vfs_block_used = heap_malloc((size_t)blocks);
+        vfs_nodes = heap_calloc((size_t)nodes, sizeof(*vfs_nodes));
+        if (vfs_storage != 0 && vfs_block_used != 0 && vfs_nodes != 0) {
+            vfs_block_count = blocks;
+            vfs_node_count = nodes;
+            return true;
+        }
+        /* Should not happen given the check above, but never hold on to a
+         * partial set: every later function indexes all three. */
+        if (vfs_storage != 0) {
+            if (vfs_storage_mapped) {
+                vm_free_pages(vfs_storage, storage_bytes);
+                vfs_storage_mapped = false;
+            } else {
+                heap_free(vfs_storage);
+            }
+            vfs_storage = 0;
+        }
+        if (vfs_block_used != 0) {
+            heap_free(vfs_block_used);
+            vfs_block_used = 0;
+        }
+        if (vfs_nodes != 0) {
+            heap_free(vfs_nodes);
+            vfs_nodes = 0;
+        }
+    }
+    return false;
+}
+
 bool vfs_mount(void)
 {
+    if (vfs_alloc_tables() == false) {
+        return false;
+    }
     vfs_format();
     if (vfs_load_image()) {
         return true;
@@ -536,7 +628,7 @@ uint32_t vfs_bytes_used(void)
 
 uint32_t vfs_bytes_total(void)
 {
-    return (uint32_t)VFS_TOTAL_BLOCKS * VFS_BLOCK_SIZE;
+    return (uint32_t)vfs_block_count * VFS_BLOCK_SIZE;
 }
 
 uint32_t vfs_bytes_free(void)
@@ -551,7 +643,7 @@ int vfs_node_total(void)
 
 int vfs_node_capacity(void)
 {
-    return VFS_MAX_NODES;
+    return vfs_node_count;
 }
 
 void vfs_absolute_of(const char *path, const char *cwd, char *out, int max)
@@ -876,7 +968,7 @@ int vfs_child_count(int index)
 
 int vfs_parent(int index)
 {
-    if (index < 0 || index >= VFS_MAX_NODES || !vfs_nodes[index].used) {
+    if (index < 0 || index >= vfs_node_count || !vfs_nodes[index].used) {
         return -1;
     }
     return vfs_nodes[index].parent;
@@ -884,7 +976,7 @@ int vfs_parent(int index)
 
 int vfs_node_created(int index)
 {
-    if (index < 0 || index >= VFS_MAX_NODES || !vfs_nodes[index].used) {
+    if (index < 0 || index >= vfs_node_count || !vfs_nodes[index].used) {
         return 0;
     }
     return (int)vfs_nodes[index].created;
@@ -892,7 +984,7 @@ int vfs_node_created(int index)
 
 uint32_t vfs_node_modified(int index)
 {
-    if (index < 0 || index >= VFS_MAX_NODES || !vfs_nodes[index].used) {
+    if (index < 0 || index >= vfs_node_count || !vfs_nodes[index].used) {
         return 0U;
     }
     return vfs_nodes[index].modified;
@@ -905,7 +997,7 @@ int vfs_count(void)
 
 const char *vfs_path(int index)
 {
-    if (index < 0 || index >= VFS_MAX_NODES || !vfs_nodes[index].used) {
+    if (index < 0 || index >= vfs_node_count || !vfs_nodes[index].used) {
         return "/";
     }
     return vfs_nodes[index].path;
@@ -913,7 +1005,7 @@ const char *vfs_path(int index)
 
 const char *vfs_name(int index)
 {
-    if (index < 0 || index >= VFS_MAX_NODES || !vfs_nodes[index].used) {
+    if (index < 0 || index >= vfs_node_count || !vfs_nodes[index].used) {
         return "/";
     }
     return vfs_nodes[index].name;
@@ -927,7 +1019,7 @@ const char *vfs_kind(int index)
         { "bin", "bin" }, { "sh", "bin" }
     };
 
-    if (index < 0 || index >= VFS_MAX_NODES || !vfs_nodes[index].used) {
+    if (index < 0 || index >= vfs_node_count || !vfs_nodes[index].used) {
         return "file";
     }
     if (vfs_nodes[index].is_dir) {
@@ -959,7 +1051,7 @@ const char *vfs_kind(int index)
 
 uint32_t vfs_size(int index)
 {
-    if (index < 0 || index >= VFS_MAX_NODES || !vfs_nodes[index].used) {
+    if (index < 0 || index >= vfs_node_count || !vfs_nodes[index].used) {
         return 0U;
     }
     if (vfs_nodes[index].is_dir) {
@@ -973,7 +1065,7 @@ const char *vfs_body(int index)
     uint32_t size;
     int length;
 
-    if (index < 0 || index >= VFS_MAX_NODES || !vfs_nodes[index].used ||
+    if (index < 0 || index >= vfs_node_count || !vfs_nodes[index].used ||
         vfs_nodes[index].is_dir) {
         vfs_scratch[0] = '\0';
         return vfs_scratch;

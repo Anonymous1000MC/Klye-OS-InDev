@@ -4,12 +4,19 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define VFS_MAX_NODES 128
+/* These are ceilings, not storage.  The tables they describe are allocated
+ * from the heap when the filesystem mounts, because they used to be static
+ * arrays in BSS and together they were most of it: 160 KiB of block store in
+ * a 1 MB BSS, which ran out before the disk did and stopped anything from
+ * being installed.  A guest too small for the full size gets a smaller
+ * filesystem rather than no filesystem, so vfs_node_capacity() and
+ * vfs_bytes_total() report what was actually allocated. */
+#define VFS_MAX_NODES 512
 #define VFS_NAME_MAX 48
 #define VFS_PATH_MAX 160
 #define VFS_BLOCK_SIZE 512
-#define VFS_TOTAL_BLOCKS 320
-#define VFS_MAX_BLOCKS_PER_FILE 24
+#define VFS_TOTAL_BLOCKS 8192    /* 4 MiB of file data */
+#define VFS_MAX_BLOCKS_PER_FILE 512  /* 256 KiB in any one file */
 #define VFS_BODY_MAX 4096
 #define VFS_LIST_MAX 64
 
