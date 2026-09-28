@@ -47,30 +47,39 @@ static char wad_upper(char character)
     return character;
 }
 
+/* Names are eight characters, NUL padded, and compared without regard to case
+ * or padding.
+ *
+ * Two traps here, both of which have bitten.  Treating "reached a space" as a
+ * match is wrong: a directory entry with an all-NUL name becomes eight spaces
+ * and so matches every lookup, which is how wad_find("ANIMATED") came to report
+ * a texture list as being version 1.9.  And reading a fixed eight bytes from
+ * the wanted name reads past its own NUL, so "SEGS" was compared against
+ * whatever followed it in .rodata and stopped matching itself.
+ *
+ * So: stop at whichever string ends first, and require the other one to be
+ * padding from that point on.  Never read past a terminator. */
 static bool wad_name_matches(const char *stored, const char *wanted)
 {
-    int index = 0;
-
-    for (;; ++index) {
+    for (int index = 0; index < WAD_LUMP_NAME_MAX; ++index) {
         char left = stored[index];
         char right = wanted[index];
 
-        if (left == 0) {
-            left = ' ';
-        }
-        if (right == 0) {
-            right = ' ';
-        }
-        if (left == ' ' || right == ' ') {
-            /* a space in either name ends the comparison: WAD names are
-             * NUL padded rather than space padded, and some editors pad with
-             * spaces instead */
+        if (left == 0 || right == 0) {
+            for (int at = index; at < WAD_LUMP_NAME_MAX; ++at) {
+                char other = left == 0 ? wanted[at] : stored[at];
+
+                if (other != 0 && other != ' ') {
+                    return false;
+                }
+            }
             return true;
         }
         if (left != right && wad_upper(left) != wad_upper(right)) {
             return false;
         }
     }
+    return true;
 }
 
 bool wad_open(const void *data, uint32_t length)
@@ -170,6 +179,11 @@ const struct wad_lump *wad_at(int index)
     return &wad_lumps[index];
 }
 
+bool wad_name_is(const char *name, const char *wanted)
+{
+    return wad_name_matches(name, wanted);
+}
+
 const struct wad_lump *wad_find(const char *name)
 {
     for (int index = 0; index < wad_lump_count; ++index) {
@@ -208,6 +222,11 @@ static bool wad_is_marker_name(const char *name)
 const char *wad_kind(void)
 {
     return wad_kind_text;
+}
+
+bool wad_is_version_199(void)
+{
+    return wad_find("ANIMATED") != 0;
 }
 
 bool wad_is_level_marker(const struct wad_lump *lump)

@@ -60,6 +60,21 @@ for t in libc_test math_test float_test; do
     fi
 done
 
+# the wad reader, checked against a real WAD when one is available.  The name
+# comparison it covers is the part that has produced two silent wrong answers.
+WAD=${WAD:-$(dirname "$0")/../DOOM1.wad}
+if [ -f "$WAD" ]; then
+    $cc $cflags -ffreestanding -c "$here/../wad.c" -o "$out/wad.o"
+    $cc $cflags -c "$here/wad_test.c" -o "$out/wad_test.o"
+    $cc "$out/wad.o" "$out/stubs.o" "$out/wad_test.o" -o "$out/wad_test" -lm
+    if ! "$out/wad_test" "$WAD"; then
+        echo "wad_test FAILED"
+        status=1
+    fi
+else
+    echo "skipping wad_test: no WAD at $WAD"
+fi
+
 # differential test against glibc; see the comment in fmt_diff.c for the two
 # known classes of disagreement and why the baseline is not zero
 $cc $cflags -c "$here/fmt_diff.c" -o "$out/fmt_diff.o"

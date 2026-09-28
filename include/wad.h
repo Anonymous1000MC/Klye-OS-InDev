@@ -43,6 +43,11 @@ const struct wad_lump *wad_at(int index);
  * callers do not have to care. */
 const struct wad_lump *wad_find(const char *name);
 
+/* Compare a lump's stored name against a plain C string, ignoring case and
+ * the padding.  A plain strcmp does not work: a stored name is always eight
+ * characters, so "SEGS" is really "SEGS    " and never compares equal. */
+bool wad_name_is(const char *name, const char *wanted);
+
 /* Pointer to a lump's bytes, or NULL when the index is out of range or the
  * lump is a marker with no data. */
 const void *wad_data(const struct wad_lump *lump);
@@ -66,6 +71,17 @@ bool wad_level_parts(const struct wad_lump *marker, const struct wad_lump **thng
 
 /* "IWAD" or "PWAD" for the loaded file, or "" when nothing is open. */
 const char *wad_kind(void);
+
+/* Whether the file uses the Doom 1.9 sector layout, where a sector's floor and
+ * ceiling are indices into PNAMES, or the older layout where they are 8-byte
+ * texture names.
+ *
+ * DOOM1.WAD, the shareware file, is the older one: it has no ANIMATED lump and
+ * its sector fields literally spell "FLOOR4_8".  Reading those four bytes as
+ * an index gives 19526, which is far outside PNAMES, so a renderer would look
+ * up garbage.  The presence of ANIMATED is what distinguishes the two, and is
+ * the same test the Doom source uses. */
+bool wad_is_version_199(void);
 
 /* Reason for the most recent failure, or "" if none. */
 const char *wad_error(void);

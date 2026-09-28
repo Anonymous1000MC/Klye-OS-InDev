@@ -4,6 +4,8 @@
 #include "apps.h"
 #include "ata.h"
 #include "blob.h"
+#include "doom.h"
+#include "doom_level.h"
 #include "fat.h"
 #include "wad.h"
 #include "vfs.h"
@@ -714,6 +716,129 @@ static void cmd_wadcheck(char **tokens, int count)
 /* "wadinfo <file>" parses a WAD straight out of the disk image and reports
  * what it found, so the directory walk can be checked against a real WAD
  * without a debugger attached. */
+/* "levelinfo <E1M1>" parses a level's structures and reports them, so the
+ * decode can be checked against the WAD without a debugger attached. */
+static void cmd_levelinfo(char **tokens, int count)
+{
+    const char *marker = "E1M1";
+    const struct doom_level *level;
+    const struct wad_lump *lump;
+
+    if (count > 1) {
+        marker = tokens[1];
+    }
+    if (!doom_wad_open()) {
+        terminal_puts("levelinfo: no wad open\n");
+        terminal_error();
+        return;
+    }
+    if (!doom_level_load(marker)) {
+        terminal_puts("levelinfo: ");
+        terminal_puts(doom_level_error());
+        terminal_puts("\n");
+        terminal_error();
+        return;
+    }
+    level = doom_level();
+    terminal_puts("levelinfo: ");
+    terminal_puts(level->name);
+    terminal_puts("\n  vertexes    ");
+    terminal_printf_number((uint64_t)level->vertex_count);
+    terminal_puts("\n  linedefs    ");
+    terminal_printf_number((uint64_t)level->linedef_count);
+    terminal_puts("\n  sidedefs    ");
+    terminal_printf_number((uint64_t)level->sidedef_count);
+    terminal_puts("\n  sectors     ");
+    terminal_printf_number((uint64_t)level->sector_count);
+    terminal_puts("\n  segs        ");
+    terminal_printf_number((uint64_t)level->seg_count);
+    terminal_puts("\n  subsectors  ");
+    terminal_printf_number((uint64_t)level->subsector_count);
+    terminal_puts("\n  nodes       ");
+    terminal_printf_number((uint64_t)level->node_count);
+    terminal_puts("\n  reject      ");
+    terminal_printf_number((uint64_t)level->reject_size);
+    terminal_puts(" bytes\n  blockmap    ");
+    terminal_printf_number((uint64_t)level->blockmap_words);
+    terminal_puts(" words\n");
+
+    /* a couple of decoded values, so a wrong stride would show up */
+    if (level->linedef_count > 0) {
+        terminal_puts("  linedef[0]  vertices ");
+        terminal_printf_number((uint64_t)level->linedefs[0].start);
+        terminal_puts(" -> ");
+        terminal_printf_number((uint64_t)level->linedefs[0].end);
+        terminal_puts(", right side ");
+        if (level->linedefs[0].right < 0) {
+            terminal_puts("none");
+        } else {
+            terminal_printf_number((uint64_t)level->linedefs[0].right);
+        }
+        terminal_puts(", left side ");
+        if (level->linedefs[0].left < 0) {
+            terminal_puts("none");
+        } else {
+            terminal_printf_number((uint64_t)level->linedefs[0].left);
+        }
+        terminal_puts("\n");
+    }
+    if (level->sector_count > 0) {
+        const struct doom_sector *s = &level->sectors[0];
+
+        terminal_puts("  sector[0]   floor ");
+        terminal_printf_number((uint64_t)(int64_t)s->floor_height);
+        terminal_puts(", ceiling ");
+        terminal_printf_number((uint64_t)(int64_t)s->ceiling_height);
+        terminal_puts("\n  textures    floor '");
+        terminal_puts(doom_level_floor_texture(s));
+        terminal_puts("' ceiling '");
+        terminal_puts(doom_level_ceiling_texture(s));
+        terminal_puts("'  layout ");
+        terminal_puts(wad_is_version_199() ? "1.9 indices" : "pre-1.9 names");
+        terminal_puts("\n  pnames      ");
+        {
+            /* signed: -1 is a real answer here, and casting it to uint64
+             * printed 18446744073709551615 */
+            int index = doom_level_patch_index(doom_level_floor_texture(s));
+
+            if (index < 0) {
+                terminal_puts("-1, so the floor is a flat rather than a texture");
+            } else {
+                terminal_printf_number((uint64_t)index);
+                terminal_puts(" for the floor texture");
+            }
+        }
+        terminal_puts("\n");
+    }
+    if (level->subsector_count > 0) {
+        terminal_puts("  subsector[0] ");
+        terminal_printf_number((uint64_t)level->subsectors[0].count);
+        terminal_puts(" segs from ");
+        terminal_printf_number((uint64_t)level->subsectors[0].first);
+        terminal_puts("\n");
+    }
+    /* and a cross check: every seg must belong to some subsector's range */
+    if (level->segs != 0 && level->subsectors != 0) {
+        uint32_t covered = 0;
+        bool ok = true;
+
+        for (uint16_t at = 0; at < level->subsector_count; ++at) {
+            uint32_t first = level->subsectors[at].first;
+
+            if (first + level->subsectors[at].count > level->seg_count) {
+                ok = false;
+            }
+            covered += level->subsectors[at].count;
+        }
+        terminal_puts("  subsectors cover ");
+        terminal_printf_number((uint64_t)covered);
+        terminal_puts(" of ");
+        terminal_printf_number((uint64_t)level->seg_count);
+        terminal_puts(ok ? " segs, all in range\n" : " segs, OUT OF RANGE\n");
+    }
+    (void)lump;
+}
+
 static void cmd_wadinfo(char **tokens, int count)
 {
     const char *path = "doom/DOOM1.WAD";
@@ -2359,6 +2484,8 @@ void shell_execute(const char *line)
         cmd_help();
     } else if (text_equal(tokens[0], "wadcheck")) {
         cmd_wadcheck(tokens, count);
+    } else if (text_equal(tokens[0], "levelinfo")) {
+        cmd_levelinfo(tokens, count);
     } else if (text_equal(tokens[0], "wadinfo")) {
         cmd_wadinfo(tokens, count);
     } else if (text_equal(tokens[0], "fatl")) {
