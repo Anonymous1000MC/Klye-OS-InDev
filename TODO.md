@@ -47,6 +47,57 @@ Ordered so each blocker sits above whatever depends on it.
 - [ ] PCI enumeration, BAR mapping, DMA-capable physical mappings
 - [ ] VIRTIO-GPU with virgl for accelerated 3D
 
+## Next phase, once the list above is done
+
+To be spun up as a fresh list rather than appended here, so the ordering can be
+rethought on its own. Recorded now so the intent is not lost.
+
+### Full ext4
+
+Read *and* write, including the journal, not the read-only or ext2 subset.
+
+- [ ] A common block and filesystem interface, so filesystems are pluggable and
+      the installer does not know which one it is writing
+- [ ] ext4 read-only first: superblock, group descriptors, inodes, extents
+      instead of indirect blocks, htree directories, 64-bit fields
+- [ ] ext4 read-write: bitmaps, block and inode allocation, extent insertion
+      and splitting, directory entry creation
+- [ ] jbd2: transactions, the commit block, replay on mount, write barriers.
+      This is the part that makes crash consistency real rather than claimed
+- [ ] ext2 read-write as a fallback, since it is the same on-disk family
+      without the journal and is a useful stepping stone
+- [ ] Checksums, or a documented decision to ignore them
+
+### Installation
+
+- [ ] A boot menu with Live and Install entries. A small selector in the
+      existing boot code rather than a GRUB dependency, unless that changes
+- [ ] Live mode: keep nothing across a reboot, and never write to the disk.
+      The RAM VFS already discards everything, so this is close to free
+- [ ] A setup screen with real options, not a single Install button:
+      device and partition selection, layout (whole disk, existing partition,
+      free space), filesystem choice, hostname, first user account, whether to
+      keep a live image, bootloader target, and a confirmation summary
+- [ ] A partitioner: read and write a partition table, and create partitions
+- [ ] The install flow end to end: lay down the filesystem, copy the kernel and
+      the base tree, install a bootloader, write config
+- [ ] Persistent root filesystem so installed apps survive a reboot
+
+### Linux binary support
+
+- [ ] An ELF loader: headers, program headers, PT_LOAD mapping, relocations for
+      a position independent binary, and TLS set up through the fs base
+- [ ] The Linux x86-64 syscall ABI, and the syscalls themselves: mmap, mprotect,
+      brk, openat, fstat, readlink, arch_prctl, set_tid_address, rt_sigaction,
+      rt_sigreturn, futex, getrandom, getdents64, ioctl, madvise, and the rest
+      that turn out to be load-bearing
+- [ ] Signals, and a futex implementation, or libc hangs on startup
+- [ ] Userspace and ring 3, which everything above depends on
+- [ ] A filesystem in Linux's layout: /lib, /usr/lib, /etc, /proc/self/maps,
+      /dev/null, /dev/urandom
+- [ ] A static musl or dietlibc program first, then dynamic linking via PT_INTERP
+- [ ] Goal: run an existing DOOM port rather than hand-writing a renderer
+
 ## Known limits and gaps
 
 - A bug that turned out not to be one, recorded so it is not re-chased: while
