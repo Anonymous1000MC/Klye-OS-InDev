@@ -18,6 +18,18 @@
 #include "blob.h"
 #include "fat.h"
 #include "mmu.h"
+#include "user.h"
+
+/* Defined in ring3.S: the stack the processor loads for itself when an
+ * interrupt arrives from ring 3.  It has to be an address the kernel can use,
+ * so it comes from the kernel's own image rather than from anything a program
+ * might have supplied. */
+/* The top of the stack an interrupt arriving from ring 3 is given.  This is
+ * the address of the label itself, so it has to be declared as an array: a
+ * scalar declaration would read the eight bytes stored at the label instead,
+ * and the processor would be handed a stack pointer of zero, which turns the
+ * first fault into a fault and the machine into a reset. */
+extern char user_kernel_stack_end[];
 #include "vfs.h"
 
 struct __attribute__((packed)) gdt_descriptor {
@@ -52,7 +64,42 @@ struct __attribute__((packed)) idt_pointer {
 _Static_assert(sizeof(struct gdt_descriptor) == 8, "invalid GDT descriptor");
 _Static_assert(sizeof(struct idt_descriptor) == 16, "invalid IDT descriptor");
 
-static struct gdt_descriptor gdt[3];
+/* Seven entries: the null descriptor the architecture requires, kernel code
+ * and data, user data and code, and a task state segment.
+ *
+ * The task state segment takes two of them, not one.  A system segment
+ * descriptor is 16 bytes where a code or data segment is 8, and loading the
+ * selector with a table that only has room for 8 bytes reads past the end of
+ * the array: a fault before the interrupt table exists, which is a triple
+ * fault and a silent reboot with no message.
+ *
+ * A program in ring 3 is loaded by adding 3 to a selector, because the ring
+ * lives in the low two bits of it, so the same descriptor is 0x10 in the
+ * kernel and 0x13 outside it. */
+static struct gdt_descriptor gdt[7];
+
+static struct __attribute__((packed)) tss_descriptor {
+    uint16_t limit_low;
+    uint16_t base_low;
+    uint8_t base_middle;
+    uint8_t access;
+    uint8_t granularity;
+    uint8_t base_high;
+    uint32_t base_upper;
+    uint32_t reserved;
+} tss_entry;
+
+static struct __attribute__((packed)) task_state_segment {
+    uint32_t reserved0;
+    uint64_t rsp[3];
+    uint64_t reserved1;
+    uint64_t ist[7];
+    uint64_t reserved2;
+    uint16_t reserved3;
+    uint16_t iomap_base;
+} tss;
+
+static bool user_segments_ready;
 static struct gdt_pointer gdt_pointer_value;
 static struct idt_descriptor idt[256];
 static struct idt_pointer idt_pointer_value;
@@ -60,6 +107,8 @@ static volatile uint64_t tick_count;
 
 extern void fpu_enable(void);
 extern uint8_t kernel_end[];
+/* The raw error code from the last vector that carries one.  See interrupts.S. */
+extern uint64_t last_error_code;
 extern void *isr_table[32];
 extern void *irq_table[16];
 extern void isr255(void);
@@ -96,10 +145,138 @@ void gdt_init(void)
         .granularity = 0xCF,
         .base_high = 0
     };
+    /* user data: readable and writable, but never executable.  Getting that
+     * backwards is the classic way to hand a program the ability to write
+     * over its own code, and it works right up until it does not. */
+    gdt[3] = (struct gdt_descriptor){
+        .limit_low = 0xFFFF,
+        .base_low = 0,
+        .base_middle = 0,
+        .access = 0xF2,           /* present, ring 3, data, writable */
+        .granularity = 0xCF,      /* 64 bit, 4 KiB granularity */
+        .base_high = 0
+    };
+    /* user code: readable, which a program in ring 3 is not always allowed and
+     * Linux does allow, so that a binary compiled one way runs either */
+    gdt[4] = (struct gdt_descriptor){
+        .limit_low = 0xFFFF,
+        .base_low = 0,
+        .base_middle = 0,
+        .access = 0xFA,           /* present, ring 3, code, readable */
+        .granularity = 0xAF,
+        .base_high = 0
+    };
+    /* the task state segment, which is what makes the processor willing to
+     * come back from ring 3 at all */
+    tss.reserved0 = 0U;
+    /* Where the processor puts the stack pointer when an interrupt arrives
+     * from ring 3.  Not optional, and not the same stack a syscall uses: a
+     * syscall can be taken from inside an interrupt, and one stack shared
+     * between the two has them overwrite each other's frames. */
+    tss.rsp[0] = (uint64_t)(uintptr_t)user_kernel_stack_end;
+    tss.rsp[1] = 0U;
+    tss.rsp[2] = 0U;
+    tss.reserved1 = 0U;
+    for (int at = 0; at < 7; ++at) {
+        tss.ist[at] = 0U;
+    }
+    tss.reserved2 = 0U;
+    tss.reserved3 = 0U;
+    /* an iomap beyond the segment, which is the documented way to say there
+     * is none: the processor treats the whole of userspace as not I/O */
+    tss.iomap_base = (uint16_t)sizeof(tss);
+    tss_entry.limit_low = (uint16_t)(sizeof(tss) - 1);
+    tss_entry.base_low = (uint16_t)((uintptr_t)&tss & 0xFFFFU);
+    tss_entry.base_middle = (uint8_t)(((uintptr_t)&tss >> 16) & 0xFFU);
+    tss_entry.access = 0x89;     /* present, 64 bit available */
+    tss_entry.granularity = 0U;
+    tss_entry.base_high = (uint8_t)(((uintptr_t)&tss >> 24) & 0xFFU);
+    tss_entry.base_upper = (uint32_t)(((uintptr_t)&tss >> 32) & 0xFFFFFFFFU);
+    tss_entry.reserved = 0U;
+    gdt[5].limit_low = tss_entry.limit_low;
+    gdt[5].base_low = tss_entry.base_low;
+    gdt[5].base_middle = tss_entry.base_middle;
+    gdt[5].access = tss_entry.access;
+    gdt[5].granularity = tss_entry.granularity;
+    gdt[5].base_high = tss_entry.base_high;
+    /* the second half of a system segment: the rest of the base, and a field
+     * that must be zero */
+    gdt[6].limit_low = tss_entry.base_upper & 0xFFFFU;
+    gdt[6].base_low = (uint16_t)(tss_entry.base_upper >> 16);
+    gdt[6].base_middle = (uint8_t)(tss_entry.reserved & 0xFFU);
+    gdt[6].access = (uint8_t)((tss_entry.reserved >> 8) & 0xFFU);
+    gdt[6].granularity = 0U;
+    gdt[6].base_high = 0U;
+    user_segments_ready = true;
+
+    /* The user descriptors, printed byte for byte.
+     *
+     * A ring switch fails on the contents of these and the only clue is that
+     * the machine rebooted, so they are worth reading back rather than
+     * re-deriving from the access and flags values.  Each entry is shown in the
+     * order the processor reads it, and the limit is the two halves joined:
+     * the high nibble lives in the flags byte, which is why a limit is never
+     * right unless both are looked at together. */
+    for (int at = 1; at <= 4; ++at) {
+        static const char digits[] = "0123456789abcdef";
+        uint8_t raw[8];
+
+        __builtin_memcpy(raw, &gdt[at], 8U);
+        serial_write("  gdt[");
+        serial_putc((char)('0' + at));
+        serial_write("] ");
+        for (int byte = 0; byte < 8; ++byte) {
+            serial_putc(digits[raw[byte] >> 4]);
+            serial_putc(digits[raw[byte] & 0xFU]);
+            serial_putc(' ');
+        }
+        serial_write("  limit ");
+        serial_write_decimal(
+            (uint64_t)(raw[0] | ((uint32_t)(raw[1] & 0x0FU) << 8)) * 4096ULL +
+            4095ULL);
+        serial_write("\n");
+    }
+
+    /* The task state segment, read back the same way.
+     *
+     * A fault taken in ring 3 cannot be reported without it: the processor
+     * loads the stack pointer from the third field of this segment to leave
+     * ring 3, and if that is wrong the report of the fault faults too, and the
+     * machine resets having said nothing.  That is the difference between a
+     * panic screen and silence, so the descriptor and the stack it names are
+     * both written down. */
+    {
+        static const char digits[] = "0123456789abcdef";
+        uint8_t low[8];
+        uint8_t high[8];
+        int at = 0;
+
+        __builtin_memcpy(low, &gdt[5], 8U);
+        __builtin_memcpy(high, &gdt[6], 8U);
+        serial_write("  tss desc  ");
+        for (at = 0; at < 8; ++at) {
+            serial_putc(digits[low[at] >> 4]);
+            serial_putc(digits[low[at] & 0xFU]);
+            serial_putc(' ');
+        }
+        for (at = 0; at < 8; ++at) {
+            serial_putc(digits[high[at] >> 4]);
+            serial_putc(digits[high[at] & 0xFU]);
+            serial_putc(' ');
+        }
+        serial_write("\n  tss rsp0  ");
+        serial_write_decimal(tss.rsp[0]);
+        serial_write("  limit ");
+        serial_write_decimal((uint64_t)tss_entry.limit_low);
+        serial_write("\n");
+    }
+
     gdt_pointer_value.limit = sizeof(gdt) - 1;
     gdt_pointer_value.base = (uint64_t)(uintptr_t)gdt;
 
     __asm__ volatile("lgdt %0" : : "m"(gdt_pointer_value));
+    /* the processor checks this before it will return from ring 3 */
+    __asm__ volatile("ltr %%ax" : : "a"((uint16_t)0x28U));
     __asm__ volatile(
         "mov $0x10, %%ax\n"
         "mov %%ax, %%ds\n"
@@ -111,6 +288,11 @@ void gdt_init(void)
         :
         : "rax"
     );
+}
+
+bool user_selectors_ready(void)
+{
+    return user_segments_ready;
 }
 
 void idt_init(void)
@@ -189,7 +371,7 @@ uint64_t pit_ticks(void)
     return tick_count;
 }
 
-static void serial_putc(char character)
+void serial_putc(char character)
 {
     while ((inb(0x3F8 + 5) & 0x20) == 0) {
     }
@@ -521,7 +703,7 @@ static void capture_fault(struct interrupt_registers *registers,
         return;
     }
     last_fault.vector = vector;
-    last_fault.error = slots[16];
+    last_fault.error = last_error_code;
     last_fault.rip = slots[17];
     last_fault.cs = slots[18];
     last_fault.rflags = slots[19];
@@ -577,13 +759,28 @@ static void report_exception(struct interrupt_registers *registers,
     serial_write(" vector ");
     serial_hex(vector);
     serial_write(" error ");
-    serial_hex(slots[16]);
+    serial_hex(last_error_code);
+    /* Bit 0 says the access came from ring 3, bit 1 that it was a write, and
+     * bit 2 that the page was there and the access was refused anyway.  The
+     * three send you to three different bugs, so they are spelled out. */
+    serial_write(" [");
+    serial_write((last_error_code & 1U) != 0U ? "user" : "supervisor");
+    serial_write((last_error_code & 2U) != 0U ? " write" : " read");
+    serial_write((last_error_code & 4U) != 0U ? " protection" : " not-present");
+    serial_write("]");
     serial_write("\n   rip ");
     serial_hex(slots[17]);
     serial_write("  cr2 ");
     serial_hex(read_control_register_2());
     serial_write("  rsp ");
     serial_hex(slots[20]);
+    /* The selectors are what say whether the fault was taken in ring 0 or in
+     * ring 3, and the error code's user bit is not to be trusted on its own
+     * for a fault on the instruction an iretq is returning to. */
+    serial_write("  cs ");
+    serial_hex(slots[18]);
+    serial_write("  ss ");
+    serial_hex(slots[21]);
     serial_write("\n   rax ");
     serial_hex(registers->rax);
     serial_write("  rbx ");
@@ -620,6 +817,14 @@ static void report_exception(struct interrupt_registers *registers,
 void interrupt_dispatch(struct interrupt_registers *registers,
                         uint64_t vector)
 {
+    /* 0x80 is not an exception, it is the syscall: it comes from ring 3 and
+     * goes back the same way, so it is dealt with before anything that assumes
+     * a fault is possible. */
+    if (vector == 0x80U) {
+        syscall_handler(registers, registers->rax);
+        return;
+    }
+
     if (vector < 32) {
         capture_fault(registers, vector);
         report_exception(registers, vector);

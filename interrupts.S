@@ -5,15 +5,28 @@
 .global isr\number
 .type isr\number, @function
 isr\number:
+    movq $0, last_error_code(%rip)
     pushq $0
     pushq $\number
     jmp isr_common
 .endm
 
+/* Written by the error-code entries before the code is dropped, and read by
+ * capture_fault.  The frame itself carries a zero in this slot, because the
+ * two entry shapes have to agree on where the vector is; that normalisation is
+ * worth having, but it costs the one field that says whether a page fault was
+ * a missing page, a write, or an access from ring 3, and those three need
+ * different fixes. */
+.global last_error_code
+last_error_code:
+    .quad 0
+
 .macro ISR_ERROR number
 .global isr\number
 .type isr\number, @function
 isr\number:
+    movq (%rsp), %rax
+    movq %rax, last_error_code(%rip)
     addq $8, %rsp
     pushq $0
     pushq $\number

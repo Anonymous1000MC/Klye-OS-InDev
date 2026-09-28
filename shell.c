@@ -22,6 +22,7 @@ extern long strtol(const char *text, char **end, int base);
 #include "kernel.h"
 #include "scheduler.h"
 #include "pci.h"
+#include "user.h"
 #include "virtio.h"
 #include "shell.h"
 #include "theme.h"
@@ -1495,6 +1496,23 @@ static void cmd_virtio(void)
     (void)pci;
 }
 
+/* "usertest" starts the ring 3 test program.
+ *
+ * There is no task and no scheduler behind this: the test is entered on the
+ * current stack's terms and never comes back, which is enough to prove the
+ * privilege switch, the syscall entry and the return, and not enough for
+ * anything else.  A real program needs a stack of its own and a way to be
+ * resumed, and that is the scheduler work this is standing in front of. */
+static void cmd_usertest(void)
+{
+    if (user_run_test() == false) {
+        terminal_puts("  usertest: no user descriptors in the table\n");
+        return;
+    }
+    /* not reached: the program is elsewhere now */
+    terminal_puts("  usertest: the program came back, which is not expected\n");
+}
+
 static void cmd_sysinfo(void)
 {
     char duration[32];
@@ -2825,6 +2843,8 @@ void shell_execute(const char *line)
         cmd_files();
     } else if (text_equal(tokens[0], "ata")) {
         cmd_ata();
+    } else if (text_equal(tokens[0], "usertest")) {
+        cmd_usertest();
     } else if (text_equal(tokens[0], "virtio")) {
         cmd_virtio();
     } else if (text_equal(tokens[0], "vblkread")) {
