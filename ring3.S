@@ -232,6 +232,21 @@ syscall_in_kernel:
     movq $0x80, %rsi
     call interrupt_dispatch
 
+    /* Re-apply the thread pointer before the frame comes apart.  arch_prctl
+     * only stores the value; nothing has told the processor about it, and the
+     * program reads %fs:0 as its very next instruction.  This has to happen
+     * here rather than after the pops because rax is where the return value
+     * is, and wrmsr needs rax to hold the base.
+     *
+     * The iretq path at the top of the file does the same thing for the same
+     * reason: the MSR is not saved across a task switch, so it is applied on
+     * every crossing rather than once.  Carrying it in only on entry meant the
+     * first arch_prctl a program ever made took effect one syscall too late.
+     */
+    movl $0xC0000100, %ecx      /* IA32_FS_BASE */
+    movq user_fs_base_slot(%rip), %rax
+    wrmsr
+
     popq %rax
     popq %rbx
     popq %rcx
