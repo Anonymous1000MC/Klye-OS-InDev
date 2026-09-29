@@ -193,6 +193,9 @@ static void put_hex(uint64_t value)
  * shows nothing at all.  Without a trace there is no way to tell which of the
  * several steps failed, and each of them looks identical from outside: the
  * machine reboots. */
+extern void user_canary_entry(void);
+extern void user_test_entry(void);
+
 void serial_marker(const char *text)
 {
     serial_write(text);
@@ -426,6 +429,31 @@ void user_report_frame(uint64_t entry, uint64_t stack, uint64_t code,
     serial_write(" data=");
     serial_write_decimal(data);
     serial_write("\n");
+}
+
+/* Run the syscall register canary: every register set to a distinct value,
+ * one unimplemented syscall, then each compared.  Anything that comes back
+ * changed is printed with its name. */
+bool user_run_canary(void)
+{
+    uint64_t entry;
+    uint64_t stack;
+    int task;
+
+    if (!user_load_test(&entry, &stack)) {
+        return false;
+    }
+    /* user_load_test copies the blob and hands back its base, so the canary is
+     * reached by adding its offset within the blob rather than by naming it --
+     * the copy is what runs, not the original. */
+    entry += (uint64_t)(uintptr_t)&user_canary_entry -
+             (uint64_t)(uintptr_t)&user_test_entry;
+    task = task_spawn_user(entry, stack);
+    if (task < 0) {
+        return false;
+    }
+    serial_write("  canary: syscall 999, checking every register\n");
+    return true;
 }
 
 bool user_run_test(void)

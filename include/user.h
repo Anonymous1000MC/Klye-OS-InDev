@@ -71,3 +71,5 @@ void user_set_heap(uint64_t start, uint64_t end);
  * `usertest` command with no program toggles it. */
 bool user_syscall_trace(void);
 void user_set_syscall_trace(bool on);
+
+bool user_run_canary(void);

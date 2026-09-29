@@ -3044,6 +3044,10 @@ void shell_execute(const char *line)
         cmd_usertest();
     } else if (text_equal(tokens[0], "strace")) {
         cmd_strace();
+    } else if (text_equal(tokens[0], "canary")) {
+        if (user_run_canary() == false) {
+            terminal_puts("  canary: could not start\n");
+        }
     } else if (text_equal(tokens[0], "virtio")) {
         cmd_virtio();
     } else if (text_equal(tokens[0], "vblkread")) {
