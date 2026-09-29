@@ -562,17 +562,22 @@ static void draw_desktop_icons(struct gfx_surface *surface)
     int y = desktop_top() + 34;
 
     for (int index = APP_COUNT - 1; index >= 0; --index) {
-        int label_width = font_text_width(app_name((enum app_id)index), 1);
-        int label_x = icon_x + (THEME_DOCK_ICON - label_width) / 2;
-
         app_draw_icon(surface, (enum app_id)index, icon_x, y,
                       THEME_DOCK_ICON);
-        gfx_rounded_rect(surface, label_x - 7, y + THEME_DOCK_ICON + 6,
-                         label_width + 14, 15, 7,
-                         PIXEL_RGB(0x1B, 0x22, 0x33));
-        font_draw_centered(surface, icon_x + THEME_DOCK_ICON / 2,
-                           y + THEME_DOCK_ICON + 18, app_name((enum app_id)index),
-                           THEME_TEXT_ON_DARK, 1);
+        /* The label is drawn with a shadow behind it rather than a filled
+         * rounded rectangle.
+         *
+         * The pill was there to keep the text readable on the old light
+         * background.  It is drawn unconditionally, for every icon, so on any
+         * wallpaper the user chooses it put a dark box behind every word on
+         * the desktop -- which reads as a rendering fault rather than as a
+         * choice.  A shadow separates the text from whatever is behind it
+         * without drawing anything, so it works on a photograph and on a flat
+         * colour alike. */
+        font_draw_centered_shadow(surface, icon_x + THEME_DOCK_ICON / 2,
+                                  y + THEME_DOCK_ICON + 18,
+                                  app_name((enum app_id)index),
+                                  THEME_TEXT_ON_DARK, 1);
         y += THEME_DOCK_ICON + 46;
     }
 }

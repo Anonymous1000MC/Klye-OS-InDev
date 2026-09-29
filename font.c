@@ -324,6 +324,31 @@ void font_draw_centered(struct gfx_surface *surface, int center_x, int baseline,
     font_draw(surface, center_x - width / 2, baseline, text, color, scale);
 }
 
+/* Centered text with a drop shadow behind it.
+ *
+ * Text drawn straight onto an arbitrary background is readable only when the
+ * background happens to contrast with it.  The alternative -- a filled rounded
+ * rectangle behind the label -- works on the desktop's own background and looks
+ * like a rendering fault on anything the user chose, because a box is drawn
+ * whether or not it is wanted.  A shadow separates the text from whatever is
+ * behind it without putting anything on the screen, so it works over a
+ * photograph and over a flat colour equally.
+ *
+ * Three offsets rather than one, so the shadow has an edge and does not read as
+ * a smeared duplicate of the text. */
+void font_draw_centered_shadow(struct gfx_surface *surface, int center_x,
+                               int baseline, const char *text, uint32_t color,
+                               int scale)
+{
+    int width = font_text_width(text, scale);
+    int x = center_x - width / 2;
+
+    font_draw(surface, x + scale, baseline + scale, text, 0xFF000000U, scale);
+    font_draw(surface, x - scale, baseline + scale, text, 0xB0000000U, scale);
+    font_draw(surface, x, baseline - scale, text, 0x80000000U, scale);
+    font_draw(surface, x, baseline, text, color, scale);
+}
+
 void font_draw_right(struct gfx_surface *surface, int right_x, int baseline,
                      const char *text, uint32_t color, int scale)
 {

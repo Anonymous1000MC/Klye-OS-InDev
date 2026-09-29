@@ -27,6 +27,11 @@ void font_draw_spaced(struct gfx_surface *surface, int x, int baseline,
                       int spacing);
 void font_draw_centered(struct gfx_surface *surface, int center_x, int baseline,
                         const char *text, uint32_t color, int scale);
+/* Centered text with a drop shadow behind it, for text drawn over a background
+ * the caller does not control. */
+void font_draw_centered_shadow(struct gfx_surface *surface, int center_x,
+                               int baseline, const char *text, uint32_t color,
+                               int scale);
 void font_draw_right(struct gfx_surface *surface, int right_x, int baseline,
                      const char *text, uint32_t color, int scale);
 void font_draw_shadow(struct gfx_surface *surface, int x, int baseline,
