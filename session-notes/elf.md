@@ -36,18 +36,40 @@ The walk for the entry address is correct, all four levels present and user:
 - The bias is inside the user window, and the window is 0x10000000000 based,
   which the guest confirmed by reading vm_user_base.
 
-## NOT ruled out, and where to look next
+## THE CAUSE, FOUND: PAE makes the kernel and the processor disagree
 
-1. **PAE.** cr4 has PAE set, so paging is three levels with an 8-byte PDPTE and
-   no PML4, but mmu.c's vm_leaf_table_flags walks four levels.  CR3 is set from
-   `page_table_pml4` and the boot code writes large-page PDEs into it, which is
-   right for PAE.  The identity map therefore works and the dynamic windows
-   may not -- the walk *prints* plausibly while indexing one level off, because
-   a walk of the wrong depth still finds present entries.  Check this first:
-   it explains why everything else works and only this does not.
-2. The `cr2 = 0` shape still says segment, and the segment looks right.  If
-   PAE turns out to be fine, dump CS/SS/descriptor at the fault itself rather
-   than after the fact.
+Read out of the running guest:
+
+    cr3 = 0x22c000   (page_table_pml4)
+    cr4 = 0x2a0      = PAE(0x20) | PGE(0x80) | OSFXSR(0x200)
+
+`mmu.c` writes and walks FOUR levels: PML4 -> PDPT -> PD -> PT.  With PAE set the
+processor uses THREE, and CR3 names a PDPT whose entries are 8 bytes, with no
+fourth level at all.  So a table index means one thing to the kernel and
+something else to the processor.
+
+That is why the diagnostic walk looked perfect and the fetch still failed: it
+printed `mmu.c`'s view of the tables, which really is correct, while the
+processor was indexing them differently.  Every dynamic mapping -- the mapping
+window, the user window, and every page an ELF program is given -- is wrong in
+the only sense that matters.
+
+The identity map survives by luck.  Under PAE, `pml4[0]` is read as a PDPT
+entry, so `pdpt_framebuffer`'s entries are read as PD entries, and `0x83` has
+the page-size bit, so they become 2 MiB pages.  That maps 0..10 MiB by accident.
+The kernel image is 1.4 MiB, so boot works and everything in it works.
+
+## Two attempts at the fix, both of which failed to boot
+
+Changing CR4 to drop PAE, and rebuilding a proper 4-level identity map
+(PML4 -> PDPT -> PD with 512 x 2 MiB entries covering the low gigabyte).  The
+assembled code was verified correct by disassembly, and the tables are at
+0x22c000/0x22d000/0x22e000, all written before paging is enabled.  It still
+produced zero serial output, so something in that path faults before the first
+print and has not been isolated yet.
+
+So: the diagnosis is solid and evidenced, the fix is not.  Do not assume PAE is
+the last word -- it is the best-supported explanation, not a confirmed one.
 
 ## Gotchas hit while building this
 
