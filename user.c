@@ -78,6 +78,74 @@ void user_set_heap(uint64_t start, uint64_t end)
     user_break_end = end;
 }
 
+/* mmap, for anonymous private mappings only.
+ *
+ * A C library asks for memory during startup with addr 0, prot
+ * PROT_READ|PROT_WRITE, flags MAP_PRIVATE|MAP_ANONYMOUS, fd -1 and offset 0,
+ * and expects back a page-aligned address it can read and write, backed by
+ * zeroed pages.  Answering -ENOSYS is a lie in a different direction: the
+ * library cannot allocate, and a program that allocates during startup has
+ * nowhere to go.
+ *
+ * File-backed mappings need a descriptor table and a page cache and are not
+ * here; they are refused rather than faked, so a program gets a real error
+ * instead of an address that reads the wrong file. */
+#define PROT_READ   0x1U
+#define PROT_WRITE  0x2U
+#define MAP_PRIVATE   0x0002U
+#define MAP_ANONYMOUS 0x0020U
+#define MAP_FIXED     0x0010U
+
+static int user_do_mmap(struct interrupt_registers *regs)
+{
+    uint64_t length = regs->rsi;
+    uint64_t prot = regs->rdx;
+    uint64_t flags = regs->r10;
+    int64_t fd = (int64_t)regs->r8;
+    uint64_t offset = regs->r9;
+
+    if ((flags & MAP_ANONYMOUS) == 0U || fd >= 0) {
+        regs->rax = (uint64_t)-95;   /* EOPNOTSUPP: no file mappings yet */
+        return 0;
+    }
+    if (offset != 0U) {
+        regs->rax = (uint64_t)-22;   /* EINVAL */
+        return 0;
+    }
+    if (length == 0U) {
+        regs->rax = (uint64_t)-22;
+        return 0;
+    }
+    if ((prot & ~(uint64_t)(PROT_READ | PROT_WRITE)) != 0U) {
+        regs->rax = (uint64_t)-22;   /* no PROT_EXEC yet */
+        return 0;
+    }
+    if ((flags & MAP_FIXED) != 0U) {
+        /* A fixed mapping would overwrite whatever is there, and the one thing
+         * this window must not do is hand out a page a program is already
+         * using.  Refused until there is a way to check. */
+        regs->rax = (uint64_t)-22;
+        return 0;
+    }
+    {
+        void *pages = vm_user_alloc_pages(length);
+
+        if (pages == 0) {
+            regs->rax = (uint64_t)-12;   /* ENOMEM */
+            return 0;
+        }
+        /* MAP_PRIVATE|MAP_ANONYMOUS on a fresh zeroed frame needs no copy and
+         * no per-page state: every mapping of it starts identical, so two
+         * private anonymous mappings of the same file offset would be
+         * indistinguishable.  That is not right in general, and it is fine
+         * here because nothing in this kernel can fault a page in yet, so no
+         * two live mappings can ever diverge. */
+        (void)(MAP_PRIVATE);
+        regs->rax = (uint64_t)(uintptr_t)pages;
+    }
+    return 0;
+}
+
 static int user_do_brk(uint64_t wanted)
 {
     if (wanted == 0U) {
@@ -256,12 +324,7 @@ static void syscall_dispatch(struct interrupt_registers *regs, uint64_t number)
             return;
         }
     case SYS_MMAP:
-        /* mmap is a long way from done: it needs a file descriptor table, a
-         * page cache and MAP_FIXED handling, and nothing in the startup path
-         * reached yet.  Answering ENOSYS rather than pretending keeps a
-         * library from believing it has memory it does not have, and unlike a
-         * fabricated address it is a failure the program can report. */
-        regs->rax = (uint64_t)-38;
+        user_do_mmap(regs);
         return;
     case SYS_EXIT:
         user_exit_code = regs->rdi;

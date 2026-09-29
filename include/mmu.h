@@ -39,6 +39,10 @@ void *vm_alloc_pages(size_t bytes);
  * there is created user-accessible.  Returns a virtual address in that range,
  * or 0. */
 void *vm_user_alloc_pages(size_t bytes);
+
+/* Set the address anonymous mmap starts from, above everything a loaded
+ * program already occupies.  See the comment at the definition. */
+void vm_set_mmap_base(uint64_t address);
 void vm_user_free_pages(void *address, size_t bytes);
 
 /* Map ring 3 memory at a specific address rather than at the next free one.

@@ -709,6 +709,10 @@ bool elf_run(const char *path)
                 return false;
             }
             user_set_heap(heap_low, heap_high);
+            /* mmap is a bump allocation from the same window, and that window's
+             * pointer still points at the bottom, where this program's own
+             * segments are.  Tell it where the program ends. */
+            vm_set_mmap_base(heap_high);
         }
     }
 

@@ -427,6 +427,21 @@ void *vm_user_map_at(uint64_t virtual_address, size_t bytes)
     return (void *)(uintptr_t)first;
 }
 
+/* Where anonymous mmap starts handing out addresses.
+ *
+ * The window's bump pointer begins at the bottom of the window, which is where
+ * a program's own segments are mapped -- those are placed by vm_user_map_at,
+ * which deliberately does not move the pointer.  So mmap, which is a bump
+ * allocation from that same pointer, would hand out addresses the program is
+ * already using.  The loader calls this once it has finished placing the image,
+ * the stack and the heap, and mmap starts above them. */
+void vm_set_mmap_base(uint64_t address)
+{
+    if (address > vm_user_next && address <= vm_user_limit) {
+        vm_user_next = address;
+    }
+}
+
 void *vm_user_alloc_pages(size_t bytes)
 {
     uint64_t start;
