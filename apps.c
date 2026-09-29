@@ -4,6 +4,7 @@
 
 #include "apps.h"
 #include "font.h"
+#include "font_ext.h"
 #include "gfx.h"
 #include "input.h"
 #include "kernel.h"
@@ -330,6 +331,43 @@ static void terminal_sgr(uint8_t parameter)
     }
 }
 
+/* Put one character in the cell at the cursor, advancing it.
+ *
+ * Both the ASCII path and the decoded one come through here so that a cell
+ * means the same thing either way: one character, with its colour, and the
+ * line's length and terminator updated together. */
+static void terminal_put_cell(char character)
+{
+    if (term_cursor_column >= TERMINAL_LOGICAL_COLS) {
+        terminal_new_line(TERMINAL_FLAG_OUTPUT);
+    }
+    term_lines[term_cursor_line][term_cursor_column] = character;
+    term_attrs[term_cursor_line][term_cursor_column] = terminal_color_current;
+    term_cursor_column++;
+    term_lengths[term_cursor_line] = (uint8_t)term_cursor_column;
+    term_lines[term_cursor_line][term_cursor_column] = '\0';
+    term_flags[term_cursor_line] |= TERMINAL_FLAG_OUTPUT;
+}
+
+/* Write a codepoint that has a glyph in the extended table.
+ *
+ * The box drawing characters are three bytes each in UTF-8, and the font only
+ * covers printable ASCII, so a logo built from them drew nothing at all: not a
+ * missing glyph but three bytes, none of which was a character.  A cell holds
+ * one byte, so the sequence is decoded here and the cell stores the glyph's
+ * index, which the font maps back.  A character with no glyph is dropped, as
+ * every other character outside ASCII already was. */
+static void terminal_put_extended(const char *text, int *index)
+{
+    uint32_t codepoint = font_utf8_next(text, index);
+    int glyph = font_ext_index(codepoint);
+
+    if (glyph < 0) {
+        return;
+    }
+    terminal_put_cell((char)(0xF0 | (char)glyph));
+}
+
 static void terminal_putc_raw(char character)
 {
     if (terminal_escape_state != 0) {
@@ -381,7 +419,10 @@ static void terminal_putc_raw(char character)
         }
         return;
     }
-    if (character < ' ' || character > '~') {
+    if (character < ' ' && character != '\t') {
+        return;
+    }
+    if (character > '~') {
         return;
     }
     if (term_cursor_column >= TERMINAL_LOGICAL_COLS) {
@@ -409,6 +450,17 @@ void terminal_write(const char *text, int length)
 {
     /* for text that is not NUL terminated, such as a slice out of a file */
     for (int index = 0; index < length; ++index) {
+        if ((uint8_t)text[index] >= 0x80U) {
+            /* count the whole sequence, so the loop does not also visit its
+             * continuation bytes as if they were characters of their own */
+            int after = index;
+            int before = index;
+
+            (void)font_utf8_next(text, &after);
+            terminal_put_extended(text, &index);
+            index = after > before ? after - 1 : index;
+            continue;
+        }
         terminal_putc_raw(text[index]);
     }
     term_scroll_offset = 0;
@@ -416,8 +468,13 @@ void terminal_write(const char *text, int length)
 
 void terminal_puts(const char *text)
 {
-    for (int index = 0; text[index] != '\0'; ++index) {
+    for (int index = 0; text[index] != '\0';) {
+        if ((uint8_t)text[index] >= 0x80U) {
+            terminal_put_extended(text, &index);
+            continue;
+        }
         terminal_putc_raw(text[index]);
+        index++;
     }
     term_scroll_offset = 0;
 }

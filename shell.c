@@ -1579,15 +1579,15 @@ static void cmd_sysinfo(void)
  * was mostly made up: a hard coded resolution, a hard coded shell version, and
  * a "Compositor: 60 fps" line that was a constant rather than a measurement. */
 static const char *const neofetch_logo[] = {
-    "  ####   #  #  #   #  ",
-    "  #   #  #  #  ##  #  ",
-    "  ####   #  #  # # #  ",
-    "  #   #  #  #  #  ##  ",
-    "  #   #   ##   #   #  ",
-    "                      "
+    "██╗  ██╗██╗  ██╗   ██╗███████╗",
+    "██║ ██╔╝██║  ╚██╗ ██╔╝██╔════╝",
+    "█████╔╝ ██║   ╚████╔╝ █████╗  ",
+    "██╔═██╗ ██║    ╚██╔╝  ██╔══╝  ",
+    "██║  ██╗███████╗██║   ███████╗",
+    "╚═╝  ╚═╝╚══════╝╚═╝   ╚══════╝"
 };
 #define NEOFETCH_LOGO_ROWS 6
-#define NEOFETCH_LOGO_WIDTH 22
+#define NEOFETCH_LOGO_WIDTH 30
 
 /* Print the logo and one summary line side by side, then either the rest of
  * the logo or nothing.  Called once per row so the summary can be as long as it
@@ -1663,15 +1663,12 @@ static void cmd_neofetch(void)
 
     /* Past the logo: the measurements, which is the point of the command. */
     shell_format_uptime(duration, (int)sizeof(duration));
-    neofetch_line(5, 0);
+    neofetch_line(4, 0);
     at = 0;
     text_copy(value + at, "Uptime: ", (int)sizeof(value) - at);
     text_copy(value + at + text_length(value), duration,
               (int)sizeof(value) - at - text_length(value));
-    terminal_puts(neofetch_logo[5]);
-    terminal_puts("  ");
-    terminal_puts(value);
-    terminal_puts("\n");
+    neofetch_line(5, value);
 
     shell_row("", "", 0);
     at = 0;

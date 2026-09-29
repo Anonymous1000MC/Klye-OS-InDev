@@ -585,53 +585,44 @@ void input_init(void)
 
     drain_output();
     (void)send_command(0xA8);
+    /* Default parameters, then the wheel, and only then enable reporting.
+     *
+     * The order matters and getting it wrong is why the wheel never worked.
+     * 0xF4 starts the device sending packets, and every packet that follows is
+     * on the same port as the acknowledgements the commands return.  Ask for
+     * the wheel after that and the response is read out of the middle of the
+     * packet stream, so the command reports no answer -- which is what "ack 0"
+     * was.  Negotiated while the device is still quiet, the answer is the only
+     * thing on the port and is read correctly. */
     ack = send_aux_command(0xF6);
     ps2_ack_f6 = ack;
     ack = send_aux_command(0xF4);
     ps2_ack_f4 = ack;
     (void)send_aux_command(0xF3);
     (void)send_aux_command(100);
-    (void)send_aux_command(0xF4);
-    /* Ask for the wheel explicitly rather than inferring it.
-     *
-     * The wheel arrives in a fourth byte of a packet, and a mouse without one
-     * never sends it.  Guessing is not safe: a first byte and a wheel byte
-     * overlap in every bit that identifies them, and treating a first byte as
-     * a wheel byte swallows the packet, which is how the keyboard stopped
-     * working when this was tried by inspection.
-     *
-     * So the device is asked.  The magic sample sequence selects sample rate,
-     * then a wheel device id, and a device that has a wheel agrees.  Having
-     * agreed, its packets are four bytes and can be dispatched on four.  One
-     * that does not agree keeps the three byte format and never sends the
-     * fourth, so its packets are dispatched on three. */
+
+    /* The magic sample sequence: 200, 80, 200, then read back a device id.  A
+     * mouse with a wheel answers 3; one without does not answer with that. */
     (void)send_aux_command(0xF3);
     (void)send_aux_command(200);
     (void)send_aux_command(0xF3);
     (void)send_aux_command(80);
     (void)send_aux_command(0xF3);
     (void)send_aux_command(200);
-    ps2_mouse_wheel = send_aux_command(0xF3) == PS2_ACK_OK;
-    (void)send_aux_command(0xF4);
-    ps2_mouse_reporting = (ps2_config_byte & PS2_CONFIG_MOUSE_IRQ) != 0U;
-    ps2_mouse_configured = ps2_mouse_reporting || ack == PS2_ACK_OK ||
-                           ps2_ack_f6 == PS2_ACK_OK;
-    if (!ps2_mouse_configured) {
-        uint32_t start = mouse_packet_count;
+    {
+        uint8_t wheel_ack = send_aux_command(0xF3);
+        uint8_t wheel_id = read_response(true);
 
-        for (uint32_t round = 0; round < PS2_MOUSE_PROBE_ROUNDS; ++round) {
-            if (mouse_packet_count != start) {
-                ps2_mouse_configured = true;
-                break;
-            }
-            delay_spins(PS2_MOUSE_PROBE_SPINS);
-        }
-        if (mouse_packet_count != start) {
-            ps2_mouse_reporting = true;
-        } else {
-            ps2_mouse_configured = true;
-        }
+        ps2_mouse_wheel = wheel_ack == PS2_ACK_OK && wheel_id == 3U;
+        serial_write("[ps2 mouse] wheel ack ");
+        serial_write_decimal(wheel_ack);
+        serial_write(" id ");
+        serial_write_decimal(wheel_id);
+        serial_putc('\n');
     }
+    /* reporting on, last */
+    (void)send_aux_command(0xF4);
+
     ps2_status_probe = inb(0x64);
     mouse_packet_index = 0;
     mouse_packet[0] = 0;

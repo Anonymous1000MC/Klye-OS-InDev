@@ -3,6 +3,8 @@
 
 #include "font.h"
 
+#include "font_ext.h"
+
 static const uint8_t glyph_data[95][FONT_GLYPH_HEIGHT] = {
     {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
     {0x18, 0x3C, 0x3C, 0x18, 0x18, 0x00, 0x18, 0x00},
@@ -116,13 +118,18 @@ uint8_t font_glyph(char character, int row)
 
 int font_char_count(const char *text)
 {
-    int length = 0;
+    /* Codepoints, for the same reason the drawing loop counts them: a caller
+     * sizing a window by font_text_width has to agree with where the glyphs
+     * were actually placed. */
+    int count = 0;
 
-    while (text[length] != '\0') {
-        ++length;
+    for (int index = 0; text[index] != '\0';) {
+        (void)font_utf8_next(text, &index);
+        count++;
     }
-    return length;
+    return count;
 }
+
 
 int font_text_width(const char *text, int scale)
 {
@@ -167,16 +174,53 @@ void font_draw_spaced(struct gfx_surface *surface, int x, int baseline,
     if (top >= (int)surface->height || top + FONT_GLYPH_HEIGHT * scale <= 0) {
         return;
     }
-    for (int index = 0; text[index] != '\0'; ++index) {
-        uint8_t character = (uint8_t)text[index];
+    /* One cell per codepoint, not per byte.  A box drawing character is three
+     * bytes, so a byte at a time advanced three cells and drew nothing, and
+     * the text beside a logo ended up three columns further right for every
+     * character in it. */
+    for (int index = 0; text[index] != '\0';) {
+        uint32_t codepoint = font_utf8_next(text, &index);
+        int glyph_row;
 
         if (cursor >= (int)surface->width) {
             break;
         }
-        if (character >= ' ' && character <= '~') {
-            for (int row = 0; row < FONT_GLYPH_HEIGHT; ++row) {
-                uint8_t bits = font_glyph((char)character, row);
-                int py = top + row * scale;
+        if (codepoint >= 0xF0U && (codepoint & 0xF0U) == 0xF0U) {
+            /* a cell holding a box glyph's index, written by the terminal */
+            for (glyph_row = 0; glyph_row < FONT_GLYPH_HEIGHT; ++glyph_row) {
+                uint8_t ext = 0U;
+                int py = top + glyph_row * scale;
+
+                if (!font_ext_glyph_for_cell((uint8_t)codepoint, glyph_row,
+                                             &ext)) {
+                    break;
+                }
+                if (ext == 0U || py < 0 || py >= (int)surface->height) {
+                    continue;
+                }
+                for (int column = 0; column < FONT_GLYPH_WIDTH; ++column) {
+                    int px;
+
+                    if ((ext & (1U << column)) == 0U) {
+                        continue;
+                    }
+                    px = cursor + column * scale;
+                    if (px < 0 || px >= (int)surface->width) {
+                        continue;
+                    }
+                    if (scale == 1) {
+                        surface->pixels[(uint32_t)py *
+                                        surface->pitch_pixels +
+                                        (uint32_t)px] = color;
+                    } else {
+                        gfx_fill(surface, px, py, scale, scale, color);
+                    }
+                }
+            }
+        } else if (codepoint >= ' ' && codepoint <= '~') {
+            for (glyph_row = 0; glyph_row < FONT_GLYPH_HEIGHT; ++glyph_row) {
+                uint8_t bits = font_glyph((char)codepoint, glyph_row);
+                int py = top + glyph_row * scale;
 
                 if (bits == 0U || py < 0 || py >= (int)surface->height) {
                     continue;
@@ -196,6 +240,39 @@ void font_draw_spaced(struct gfx_surface *surface, int x, int baseline,
                                         (uint32_t)px] = color;
                     } else {
                         gfx_fill(surface, px, py, scale, scale, color);
+                    }
+                }
+            }
+        } else {
+            uint8_t bits = 0U;
+
+            if (font_ext_glyph(codepoint, 0, &bits)) {
+                for (glyph_row = 0; glyph_row < FONT_GLYPH_HEIGHT;
+                     ++glyph_row) {
+                    uint8_t ext = 0U;
+                    int py = top + glyph_row * scale;
+
+                    (void)font_ext_glyph(codepoint, glyph_row, &ext);
+                    if (ext == 0U || py < 0 || py >= (int)surface->height) {
+                        continue;
+                    }
+                    for (int column = 0; column < FONT_GLYPH_WIDTH; ++column) {
+                        int px;
+
+                        if ((ext & (1U << column)) == 0U) {
+                            continue;
+                        }
+                        px = cursor + column * scale;
+                        if (px < 0 || px >= (int)surface->width) {
+                            continue;
+                        }
+                        if (scale == 1) {
+                            surface->pixels[(uint32_t)py *
+                                            surface->pitch_pixels +
+                                            (uint32_t)px] = color;
+                        } else {
+                            gfx_fill(surface, px, py, scale, scale, color);
+                        }
                     }
                 }
             }
