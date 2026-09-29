@@ -265,7 +265,23 @@ void font_draw_spaced(struct gfx_surface *surface, int x, int baseline,
     top = baseline - FONT_ASCENT * scale;
     step = (FONT_ADVANCE + spacing) * scale;
     for (int index = 0; text[index] != '\0';) {
-        uint32_t codepoint = font_utf8_next(text, &index);
+        uint32_t codepoint;
+
+        /* A cell byte, not a sequence.
+         *
+         * The terminal stores a box glyph's index in one byte at 0xF0, so that
+         * a cell is always one character wide.  0xF0 is also the lead byte of a
+         * four byte UTF-8 sequence, and decoding it as one swallowed the next
+         * three characters of the line as continuation bytes: the glyph drew
+         * and the text after it vanished, three characters at a time, which
+         * looked like the line had holes in it.  So the byte is taken as a
+         * byte before any decoding is attempted. */
+        if (((uint8_t)text[index] & 0xF0U) == 0xF0U) {
+            codepoint = (uint8_t)text[index];
+            index++;
+        } else {
+            codepoint = font_utf8_next(text, &index);
+        }
 
         if (cursor >= (int)surface->width) {
             break;
@@ -281,12 +297,11 @@ void font_draw_spaced(struct gfx_surface *surface, int x, int baseline,
                            (void *)(intptr_t)(0xF0U | (uint32_t)index_of),
                            color, scale);
             }
-        } else {
+        } else if (((uint8_t)codepoint & 0xF0U) == 0xF0U) {
             uint8_t cell = 0U;
 
             /* a cell byte written by the terminal */
-            if ((codepoint & 0xF0U) == 0xF0U &&
-                font_ext_glyph_for_cell((uint8_t)codepoint, 0, &cell)) {
+            if (font_ext_glyph_for_cell((uint8_t)codepoint, 0, &cell)) {
                 glyph_draw(surface, cursor, top, glyph_row_ext,
                            (void *)(intptr_t)codepoint, color, scale);
             }
