@@ -30,6 +30,13 @@ enum wm_action {
 
 void wm_init(void);
 void wm_service(void);
+
+/* Set the desktop background from a PNG on the filesystem, scaled to cover the
+ * screen.  Falls back to the built in background if the file cannot be read or
+ * decoded, so a bad path leaves a working desktop rather than a blank one.
+ * Returns false with a reason in wm_wallpaper_error(). */
+bool wm_set_wallpaper(const char *path);
+const char *wm_wallpaper_error(void);
 void wm_launch_app(enum app_id app);
 void wm_launch_lua(int host_index, const char *title, int width, int height);
 void wm_launch_script(int script_index, const char *title, int width,

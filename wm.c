@@ -5,6 +5,8 @@
 #include "apps.h"
 #include "font.h"
 #include "gfx.h"
+#include "heap.h"
+#include "png.h"
 #include "input.h"
 #include "kby.h"
 #include "launcher.h"
@@ -192,6 +194,7 @@ static const uint16_t cursor_shape[16] = {
 };
 
 static struct wm_state wm;
+static const char *wallpaper_error_text = "";
 static struct gfx_surface wallpaper_surface;
 static uint32_t *wallpaper_pixels;
 static uint32_t animation_tick;
@@ -2476,6 +2479,68 @@ static void refresh_chrome(void)
     for (int index = 0; index < APP_COUNT; ++index) {
         wm.heartbeat[index] = pit_ticks();
     }
+}
+
+const char *wm_wallpaper_error(void)
+{
+    return wallpaper_error_text;
+}
+
+bool wm_set_wallpaper(const char *path)
+{
+    int length;
+    uint8_t *data;
+    bool ok;
+
+    wallpaper_error_text = "";
+    {
+        int index = vfs_open(path);
+
+        if (index < 0) {
+            wallpaper_error_text = "no such file";
+            return false;
+        }
+        /* the size from the node rather than by reading to the end, so the
+         * whole file is allocated once and read once */
+        length = (int)vfs_size(index);
+        if (length <= 0) {
+            wallpaper_error_text = "the file is empty";
+            return false;
+        }
+        data = (uint8_t *)heap_malloc((size_t)length);
+        if (data == 0) {
+            wallpaper_error_text = "not enough memory to read the file";
+            return false;
+        }
+        if (vfs_read(path, (char *)data, (uint32_t)length) != length) {
+            heap_free(data);
+            wallpaper_error_text = "the file could not be read";
+            return false;
+        }
+    }
+    ok = png_decode(data, (size_t)length, wm.wallpaper);
+    heap_free(data);
+    if (!ok) {
+        wallpaper_error_text = png_error();
+        /* the background is left as it was rather than cleared, so a file that
+         * fails to decode leaves a working desktop instead of a blank one */
+        return false;
+    }
+    /* The whole screen, not just the chrome.
+     *
+     * The background sits behind every window, so changing it means the region
+     * it occupies has to be repainted rather than only the title bars and the
+     * dock that mark_chrome_dirty covers.  Marking only the chrome left the
+     * old background on the screen with the new one decoded in memory behind
+     * it, which looks exactly like the command having done nothing. */
+    wm.chrome_dirty = 1U;
+    for (int index = 0; index < WM_WINDOW_LIMIT; ++index) {
+        if (wm.windows[index].used != 0) {
+            wm.windows[index].content_dirty = 1U;
+        }
+    }
+    gfx_damage(0, 0, (int)gfx_width(), (int)gfx_height());
+    return true;
 }
 
 void wm_init(void)

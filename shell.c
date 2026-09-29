@@ -303,6 +303,7 @@ static void cmd_help(void)
     shell_row("ps", "running tasks", 14);
     shell_row("uptime", "time since boot", 14);
     shell_row("neofetch", "system summary", 14);
+    shell_row("wallpaper PATH", "set the background from a PNG", 14);
     shell_row("reboot", "restart the machine", 14);
     shell_row("bench [N]", "measure compositor speed", 14);
     shell_row("kbyrun PROG", "run a KBY bytecode program", 14);
@@ -1539,6 +1540,30 @@ static void cmd_elf(const char *path)
         return;
     }
     terminal_puts("  elf: started; its output follows on the serial port\n");
+}
+
+/* "wallpaper PATH" sets the desktop background from a PNG on the filesystem.
+ *
+ * Anything that is a legal PNG is accepted -- 8 or 16 bits per channel,
+ * greyscale, palette or truecolour, with or without alpha -- and the image is
+ * scaled to cover the screen.  Interlaced images are refused by name rather
+ * than drawn wrong, and re-saving one without interlacing fixes it. */
+static void cmd_wallpaper(const char *path)
+{
+    if (path == 0 || path[0] == 0) {
+        terminal_puts("  wallpaper: give a path, for example: "
+                      "wallpaper /home/klye/picture.png\n");
+        return;
+    }
+    if (wm_set_wallpaper(path) == false) {
+        terminal_puts("  wallpaper: ");
+        terminal_puts(wm_wallpaper_error());
+        terminal_puts("\n");
+        return;
+    }
+    terminal_puts("  wallpaper: set from ");
+    terminal_puts(path);
+    terminal_puts("\n");
 }
 
 static void cmd_sysinfo(void)
@@ -2998,6 +3023,8 @@ void shell_execute(const char *line)
         cmd_files();
     } else if (text_equal(tokens[0], "ata")) {
         cmd_ata();
+    } else if (text_equal(tokens[0], "wallpaper")) {
+        cmd_wallpaper(count > 1 ? tokens[1] : 0);
     } else if (text_equal(tokens[0], "elf")) {
         cmd_elf(count > 1 ? tokens[1] : 0);
     } else if (text_equal(tokens[0], "usertest")) {
