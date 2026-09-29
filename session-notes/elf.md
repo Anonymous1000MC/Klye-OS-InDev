@@ -36,40 +36,39 @@ The walk for the entry address is correct, all four levels present and user:
 - The bias is inside the user window, and the window is 0x10000000000 based,
   which the guest confirmed by reading vm_user_base.
 
-## THE CAUSE, FOUND: PAE makes the kernel and the processor disagree
+## PAE: looked like the cause, and is not
 
-Read out of the running guest:
+cr3 = 0x22c000 and cr4 = 0x2a0 (PAE set), while mmu.c writes and walks four
+levels.  That is a real inconsistency and it is why vm_dump_walk printed a
+perfect walk: it prints mmu.c's own view, which is correct, and the processor
+indexes the same tables differently.  It is a genuine latent bug.
 
-    cr3 = 0x22c000   (page_table_pml4)
-    cr4 = 0x2a0      = PAE(0x20) | PGE(0x80) | OSFXSR(0x200)
+But it is NOT why the ELF program cannot be fetched.  Tested directly: clearing
+PAE in CR4 and leaving the original six page table entries completely unchanged
+still produced zero serial output, and so did the correct 4-level identity map
+with the framebuffer mapped.  Every variant with PAE clear fails to boot at all,
+including the one that differs from the working kernel by a single bit.
 
-`mmu.c` writes and walks FOUR levels: PML4 -> PDPT -> PD -> PT.  With PAE set the
-processor uses THREE, and CR3 names a PDPT whose entries are 8 bytes, with no
-fourth level at all.  So a table index means one thing to the kernel and
-something else to the processor.
+So the boot code genuinely needs PAE, for reasons not yet understood -- plausibly
+it relies on PAE's 64-bit CR3/entry layout combined with how the firmware left
+memory, or the tables were written to suit a 3-level read and changing one bit
+breaks an assumption elsewhere in the same file.
 
-That is why the diagnostic walk looked perfect and the fetch still failed: it
-printed `mmu.c`'s view of the tables, which really is correct, while the
-processor was indexing them differently.  Every dynamic mapping -- the mapping
-window, the user window, and every page an ELF program is given -- is wrong in
-the only sense that matters.
+Correct the earlier claim: this is an open inconsistency worth fixing
+carefully, not the ELF fault.  Do not spend another attempt on it without first
+working out why the boot needs it.
 
-The identity map survives by luck.  Under PAE, `pml4[0]` is read as a PDPT
-entry, so `pdpt_framebuffer`'s entries are read as PD entries, and `0x83` has
-the page-size bit, so they become 2 MiB pages.  That maps 0..10 MiB by accident.
-The kernel image is 1.4 MiB, so boot works and everything in it works.
+## What is still unexplained
 
-## Two attempts at the fix, both of which failed to boot
+The instruction fetch at the entry is refused with cr2 = 0 while every table
+the kernel builds is present and user, the GDT limit is 4 GiB, and the task
+frame read back from the running guest is correct.  cr2 = 0 says the fault
+happened before paging, which points at the segment -- but the segment measures
+out correct.  That contradiction is the whole remaining problem.
 
-Changing CR4 to drop PAE, and rebuilding a proper 4-level identity map
-(PML4 -> PDPT -> PD with 512 x 2 MiB entries covering the low gigabyte).  The
-assembled code was verified correct by disassembly, and the tables are at
-0x22c000/0x22d000/0x22e000, all written before paging is enabled.  It still
-produced zero serial output, so something in that path faults before the first
-print and has not been isolated yet.
-
-So: the diagnosis is solid and evidenced, the fix is not.  Do not assume PAE is
-the last word -- it is the best-supported explanation, not a confirmed one.
+Next step: dump CS, SS and the loaded descriptor at the moment of the fault,
+from inside the fault handler, rather than after the fact.  Everything checked
+so far was checked after the machine had already moved on.
 
 ## Gotchas hit while building this
 
