@@ -248,7 +248,6 @@ syscall_in_kernel:
     popq %r14
     popq %r15
     addq $24, %rsp                /* the error code, the vector, the return address */
-    call serial_marker_ptr_in_kernel
     jmp syscall_return
 
 .globl syscall_return
