@@ -589,7 +589,12 @@ static void draw_menubar(struct gfx_surface *surface)
     int clock_width;
     int offset;
 
-    gfx_fill(surface, 0, 0, (int)gfx_width(), height, THEME_MENUBAR_FILL);
+    /* Blended, not filled.  The bar sits over the wallpaper, so an opaque fill
+     * paints out a third of the picture in one strip.  The alpha is high enough
+     * to keep the text legible over a busy background and low enough that the
+     * picture is still visibly there behind it. */
+    gfx_blend_rect(surface, 0, 0, (int)gfx_width(), height,
+                   THEME_MENUBAR_FILL, 232U);
     gfx_fill(surface, 0, 0, (int)gfx_width(), 1, THEME_MENUBAR_EDGE);
     gfx_fill(surface, 0, height - 1, (int)gfx_width(), 1,
              PIXEL_RGB(0x00, 0x00, 0x00));
@@ -600,9 +605,9 @@ static void draw_menubar(struct gfx_surface *surface)
         int selected = wm.active_menu == menu;
 
         if (menu == MENU_APPLE) {
-            gfx_circle(surface, x + 7, height / 2, 6, THEME_TEXT_PRIMARY);
-            gfx_fill(surface, x + 4, height / 2 - 6, 2, 3, THEME_TEXT_PRIMARY);
-            gfx_fill(surface, x + 9, height / 2 - 7, 2, 4, THEME_TEXT_PRIMARY);
+            gfx_circle(surface, x + 7, height / 2, 6, THEME_TEXT_ON_DARK);
+            gfx_fill(surface, x + 4, height / 2 - 6, 2, 3, THEME_TEXT_ON_DARK);
+            gfx_fill(surface, x + 9, height / 2 - 7, 2, 4, THEME_TEXT_ON_DARK);
             width = MENU_APPLE_WIDTH;
             if (selected) {
                 gfx_rounded_rect(surface, x - 6, 4, width + 12, height - 8, 5,
@@ -618,7 +623,7 @@ static void draw_menubar(struct gfx_surface *surface)
                              THEME_MENUBAR_SELECT);
         }
         font_draw(surface, x, height - 9, menus[menu].title,
-                  selected ? THEME_ACCENT_DEEP : THEME_TEXT_PRIMARY, 1);
+                  selected ? THEME_ACCENT : THEME_TEXT_ON_DARK, 1);
     }
 
     {
@@ -883,8 +888,10 @@ static void draw_dock(struct gfx_surface *surface)
     height = dock_box_height();
     y = wm.dock_y;
 
-    gfx_rounded_rect(surface, wm.dock_origin_x, y, wm.dock_width, height,
-                     THEME_DOCK_RADIUS, THEME_DOCK_FILL);
+    /* Blended for the same reason as the menu bar: the dock floats over the
+     * wallpaper and an opaque fill would hide whatever is behind it. */
+    gfx_rounded_rect_alpha(surface, wm.dock_origin_x, y, wm.dock_width, height,
+                           THEME_DOCK_RADIUS, THEME_DOCK_FILL, 236U);
     gfx_rounded_border(surface, wm.dock_origin_x, y, wm.dock_width, height,
                        THEME_DOCK_RADIUS, 1, THEME_DOCK_BORDER);
 

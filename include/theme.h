@@ -58,13 +58,25 @@
 
 #define THEME_SHADOW_COLOR PIXEL_RGB(0x1B, 0x22, 0x33)
 
-#define THEME_MENUBAR_FILL PIXEL_RGB(0xE4, 0xE7, 0xEE)
+/* The chrome is translucent, and this is why.
+ *
+ * These surfaces are drawn over whatever the desktop background is, which is a
+ * wallpaper the user chose rather than a colour this file decides.  Opaque and
+ * near white, they were two glaring bars laid over a dark picture: not a bug in
+ * the drawing but a panel that had never been over anything but a light
+ * background.  Alpha lets the picture through, so the bar reads as a surface
+ * floating over the desktop instead of pasted on top of it, and it looks the
+ * same over the built in background as before.
+ *
+ * The text on them is light, because they are now dark-ish glass rather than
+ * white paper. */
+#define THEME_MENUBAR_FILL PIXEL_RGB(0x1A, 0x1D, 0x26)
 #define THEME_MENUBAR_EDGE PIXEL_RGB(0xC2, 0xC7, 0xD2)
-#define THEME_MENUBAR_SELECT PIXEL_RGB(0xC2, 0xCD, 0xE4)
+#define THEME_MENUBAR_SELECT PIXEL_RGB(0x3A, 0x44, 0x58)
 #define THEME_MENU_FILL PIXEL_RGB(0xF2, 0xF3, 0xF7)
 #define THEME_MENU_BORDER PIXEL_RGB(0xB6, 0xBC, 0xC9)
-#define THEME_DOCK_FILL PIXEL_RGB(0xEC, 0xEE, 0xF4)
-#define THEME_DOCK_BORDER PIXEL_RGB(0xAE, 0xB5, 0xC4)
+#define THEME_DOCK_FILL PIXEL_RGB(0x22, 0x26, 0x30)
+#define THEME_DOCK_BORDER PIXEL_RGB(0x55, 0x5E, 0x70)
 
 #define THEME_MENUBAR_HEIGHT 28
 #define THEME_MENU_FONT_HEIGHT 8
