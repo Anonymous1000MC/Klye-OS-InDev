@@ -128,57 +128,57 @@ user_canary_entry:
     movq $0x1111, %r11
     cmpq %r11, %rbx
     je 2f
-    orb $65, canary_report+0(%rip)
+    movb $65, canary_report+0(%rip)
 2:
     movq $0x2222, %r11
     cmpq %r11, %rbp
     je 2f
-    orb $66, canary_report+1(%rip)
+    movb $66, canary_report+1(%rip)
 2:
     movq $0x3333, %r11
     cmpq %r11, %r12
     je 2f
-    orb $67, canary_report+2(%rip)
+    movb $67, canary_report+2(%rip)
 2:
     movq $0x4444, %r11
     cmpq %r11, %r13
     je 2f
-    orb $68, canary_report+3(%rip)
+    movb $68, canary_report+3(%rip)
 2:
     movq $0x5A5A, %r11
     cmpq %r11, %r14
     je 2f
-    orb $69, canary_report+4(%rip)
+    movb $69, canary_report+4(%rip)
 2:
     movq $0x4446, %r11
     cmpq %r11, %r15
     je 2f
-    orb $70, canary_report+5(%rip)
+    movb $70, canary_report+5(%rip)
 2:
     movq $0x5555, %r11
     cmpq %r11, %rdi
     je 2f
-    orb $71, canary_report+6(%rip)
+    movb $71, canary_report+6(%rip)
 2:
     movq $0x6666, %r11
     cmpq %r11, %rsi
     je 2f
-    orb $72, canary_report+7(%rip)
+    movb $72, canary_report+7(%rip)
 2:
     movq $0x7777, %r11
     cmpq %r11, %rdx
     je 2f
-    orb $73, canary_report+8(%rip)
+    movb $73, canary_report+8(%rip)
 2:
     movq $0x8888, %r11
     cmpq %r11, %r8
     je 2f
-    orb $74, canary_report+9(%rip)
+    movb $74, canary_report+9(%rip)
 2:
     movq $0x9999, %r11
     cmpq %r11, %r9
     je 2f
-    orb $75, canary_report+10(%rip)
+    movb $75, canary_report+10(%rip)
 2:
     movq $1, %rax
     movq $1, %rdi

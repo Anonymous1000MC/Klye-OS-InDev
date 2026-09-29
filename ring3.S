@@ -149,7 +149,13 @@ user_enter:
      * on the way in so the first instruction the program runs already sees its
      * own thread local storage. */
     movl $0xC0000100, %ecx      /* IA32_FS_BASE */
+    /* The base is 64 bits and wrmsr takes it as edx:eax -- 32 bits each.  rax
+     * alone is not the value: edx has to be bits 32 through 63 of it, and
+     * whatever was there before is now known to have been written into the
+     * high half of a user pointer. */
     movq user_fs_base_slot(%rip), %rax
+    movq %rax, %rdx
+    shrq $32, %rdx
     wrmsr
     call serial_marker_ptr_enter
     iretq
@@ -244,7 +250,13 @@ syscall_in_kernel:
      * first arch_prctl a program ever made took effect one syscall too late.
      */
     movl $0xC0000100, %ecx      /* IA32_FS_BASE */
+    /* edx is bits 32:63 of the base, not a spare register.  interrupt_dispatch
+     * returns having used it, and a wrmsr that leaves it alone writes the high
+     * half of a user pointer from whatever the last C function happened to
+     * return. */
     movq user_fs_base_slot(%rip), %rax
+    movq %rax, %rdx
+    shrq $32, %rdx
     wrmsr
 
     popq %rax
