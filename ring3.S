@@ -313,9 +313,9 @@ syscall_return:
      * the fetch. */
     movq $0x23, %rax
     shlq $48, %rax
-    movq $0x1B, %rbx
-    shlq $32, %rbx
-    orq %rbx, %rax
+    movq $0x1B, %r10
+    shlq $32, %r10
+    orq %r10, %rax
     orq %r11, %rax
     movq %rax, %r11
     sysretq
