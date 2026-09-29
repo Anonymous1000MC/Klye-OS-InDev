@@ -1520,6 +1520,19 @@ static void cmd_usertest(void)
     terminal_puts("  usertest: started; its output follows on the serial port\n");
 }
 
+/* Toggles the syscall trace, on its own command.
+ *
+ * It was folded into usertest first, which meant the first `usertest` turned
+ * tracing on and returned without running the test at all -- a test command
+ * that silently does not test is worse than no command. */
+static void cmd_strace(void)
+{
+    bool on = !user_syscall_trace();
+
+    user_set_syscall_trace(on);
+    terminal_puts(on ? "  syscall trace on\n" : "  syscall trace off\n");
+}
+
 /* "elf <path>" loads an ELF executable from the filesystem and runs it.
  *
  * This is the first program that has ever been loaded from a file rather than
@@ -3029,6 +3042,8 @@ void shell_execute(const char *line)
         cmd_elf(count > 1 ? tokens[1] : 0);
     } else if (text_equal(tokens[0], "usertest")) {
         cmd_usertest();
+    } else if (text_equal(tokens[0], "strace")) {
+        cmd_strace();
     } else if (text_equal(tokens[0], "virtio")) {
         cmd_virtio();
     } else if (text_equal(tokens[0], "vblkread")) {

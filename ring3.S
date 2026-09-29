@@ -285,10 +285,24 @@ syscall_return:
     movq user_fs_base_slot(%rip), %rax
     wrmsr
 
-    movq user_syscall_stack(%rip), %rbx
+    /* %rsp is loaded straight from memory, with no register in between.
+     *
+     * This used to go through %rbx, as scratch, and that is an ABI violation
+     * that costs nothing to look at in a test program and everything to a real
+     * one.  A syscall on x86-64 is a function call as far as the calling code
+     * is concerned: it clobbers %rcx and %r11 and nothing else.  Every other
+     * register, %rbx included, comes back as it went in.
+     *
+     * musl keeps the initial thread's control block in %rbx across the
+     * arch_prctl it makes during TLS setup.  Handing it a stack pointer
+     * instead means its next store -- `movl $0x2,0x38(%rbx)`, writing a flag
+     * into the thread struct -- goes to an address that is not the thread
+     * struct, and the program faults there with nothing to connect it to the
+     * syscall that went before it.  usertest never noticed, because it does
+     * not keep anything in a callee-saved register across a syscall. */
+    movq user_syscall_stack(%rip), %rsp
     movq user_syscall_rip(%rip), %rcx
     movq user_syscall_rflags(%rip), %r11
-    movq %rbx, %rsp
     /* sysretq takes its instruction pointer from rcx and both selectors plus
      * the flags from r11: CS in bits 63:48, SS in 47:32, RFLAGS in the low
      * half.  The two selectors in STAR cannot supply that, because the field

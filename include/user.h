@@ -66,3 +66,8 @@ void syscall_entry(void);
  * exists.  `start` is the first address of the heap and `end` the first address
  * past it. */
 void user_set_heap(uint64_t start, uint64_t end);
+
+/* Print every syscall with its arguments and result.  Off by default; the
+ * `usertest` command with no program toggles it. */
+bool user_syscall_trace(void);
+void user_set_syscall_trace(bool on);

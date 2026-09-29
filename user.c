@@ -141,9 +141,77 @@ MARK(serial_marker_ptr_enter, "r3: user_enter, about to iretq into ring 3");
 MARK(serial_marker_ptr_in_kernel, "r3: now in ring 0 after lretq");
 MARK(serial_marker_ptr_return, "r3: returning to ring 3");
 
+/* Every syscall, with its arguments and its result.
+ *
+ * Reading a C library's startup one fault at a time is hopeless: each fault
+ * reveals exactly one missing piece and hides the next, and the fix for one is
+ * only visible after the previous one is in.  Printing the whole sequence
+ * turns that into a list, so the missing pieces can all be implemented
+ * together instead of one per run.
+ *
+ * The result is printed by the return path rather than here, so a syscall that
+ * never returns -- and exit never does -- is still on the record. */
+#define SYS_EXIT_GROUP 231
+
+static void put_hex(uint64_t value);
+static void syscall_dispatch(struct interrupt_registers *regs,
+                              uint64_t number);
+
+static bool syscall_trace = false;
+static uint64_t traced_number;
+
+static void trace_begin(struct interrupt_registers *regs, uint64_t number)
+{
+    traced_number = number;
+    serial_write("TRACE rax=");
+    put_hex(number);
+    serial_write(" rdi=");
+    put_hex(regs->rdi);
+    serial_write(" rsi=");
+    put_hex(regs->rsi);
+    serial_write(" rdx=");
+    put_hex(regs->rdx);
+    serial_write(" r10=");
+    put_hex(regs->r10);
+    serial_write(" ->");
+}
+
+static void trace_end(uint64_t result)
+{
+    if (!syscall_trace) {
+        return;
+    }
+    put_hex(result);
+    serial_write("\n");
+    if (traced_number == SYS_EXIT || traced_number == SYS_EXIT_GROUP) {
+        serial_write("TRACE end of program\n");
+    }
+}
+
+bool user_syscall_trace(void)
+{
+    return syscall_trace;
+}
+
+void user_set_syscall_trace(bool on)
+{
+    syscall_trace = on;
+}
+
 void syscall_handler(struct interrupt_registers *regs, uint64_t number)
 {
     syscalls++;
+    if (syscall_trace) {
+        trace_begin(regs, number);
+    }
+    syscall_dispatch(regs, number);
+    if (syscall_trace) {
+        trace_end(regs->rax);
+    }
+}
+
+static void syscall_dispatch(struct interrupt_registers *regs, uint64_t number)
+{
     switch (number) {
     case SYS_WRITE: {
         /* arguments come in the registers the C ABI already uses, which is
