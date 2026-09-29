@@ -111,7 +111,8 @@ user_canary_entry:
     movq $0x5A5A, %r14
 
     /* syscall 999: not implemented, must come back -ENOSYS and change
-     * nothing else */
+     * nothing else.  It takes no arguments, so unlike close(-1) it does not
+     * have to be handed registers that are themselves canaries. */
     movq $999, %rax
     syscall
 

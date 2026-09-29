@@ -349,9 +349,15 @@ static void syscall_dispatch(struct interrupt_registers *regs, uint64_t number)
         task_kill_current();
         return;
     default:
-        serial_write("  user: unknown syscall ");
-        put_hex(number);
-        serial_putc('\n');
+        /* Only under strace.  An unimplemented syscall is an ordinary thing
+         * for a program to do, not an event worth a line of serial, and a
+         * print here sits between the frame and the checks that look at it. */
+        if (syscall_trace)
+            serial_write("  user: unknown syscall ");
+        if (syscall_trace) {
+            put_hex(number);
+            serial_putc('\n');
+        }
         regs->rax = (uint64_t)-38; /* ENOSYS */
         return;
     }
