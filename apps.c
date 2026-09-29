@@ -12,19 +12,46 @@
 #include "theme.h"
 #include "vfs.h"
 
-#define TERMINAL_LOGICAL_COLS 92
-#define TERMINAL_LINE_HEIGHT 12
-#define TERMINAL_PAD_X 10
-#define TERMINAL_PAD_Y 8
-#define TERMINAL_HEADER 22
+/* Text scale.
+ *
+ * Everything below is derived from it rather than written out, because a hard
+ * coded line height next to a scaled font is a mismatch waiting to happen: the
+ * glyphs get taller and the rows do not, and text starts overlapping the row
+ * above with nothing to explain it.
+ *
+ * 2 is the smallest scale at which an 8x8 bitmap font stops reading as a grid
+ * of blocks.  At 1 the pixel grid is the dominant feature of every label in
+ * the interface, which is what made the whole desktop look like it was drawn
+ * on graph paper. */
+#define TEXT_SCALE 2
+#define TEXT_ADVANCE (FONT_ADVANCE * TEXT_SCALE)
+#define TEXT_ASCENT (FONT_ASCENT * TEXT_SCALE)
+#define TEXT_HEIGHT (FONT_LINE_HEIGHT * TEXT_SCALE)
+
+/* How many cells a line may hold.
+ *
+ * This is the line buffer's limit, not the window's, and the two are
+ * different: the window decides how much is visible, this decides how much can
+ * be stored, and a line that wraps here rather than being drawn long is a line
+ * that breaks in the middle of a word.
+ *
+ * It has to be generous enough for the widest line anything prints at the
+ * current text scale, and the window is wide enough to show that many, so the
+ * two are kept in step by deriving both from the same numbers. */
+#define TERMINAL_LOGICAL_COLS 72
+#define TERMINAL_LINE_HEIGHT (12 * TEXT_SCALE)
+#define TERMINAL_PAD_X (10 * TEXT_SCALE)
+#define TERMINAL_PAD_Y (8 * TEXT_SCALE)
+#define TERMINAL_HEADER (22 * TEXT_SCALE)
 #define TERMINAL_FLAG_PROMPT 0x01U
 #define TERMINAL_FLAG_OUTPUT 0x02U
 #define TERMINAL_FLAG_ERROR 0x04U
 #define TERMINAL_FLAG_COMMAND 0x08U
 
-#define EDITOR_LINE_HEIGHT 12
-#define EDITOR_GUTTER 34
-#define EDITOR_PAD_Y 8
+#define EDITOR_LINE_HEIGHT (12 * TEXT_SCALE)
+#define EDITOR_GUTTER (34 * TEXT_SCALE)
+#define EDITOR_PAD_X (8 * TEXT_SCALE)
+#define EDITOR_PAD_Y (8 * TEXT_SCALE)
 #define EDITOR_TAB 4
 #define EDITOR_STATUS 20
 #define CURSOR_BLINK_TICKS 530U
@@ -794,14 +821,14 @@ void terminal_draw(struct gfx_surface *surface, int x, int y, int width,
     gfx_horizontal_line(surface, x, y + TERMINAL_HEADER - 1, width,
                         PIXEL_RGB(0x33, 0x33, 0x3C));
     app_draw_icon(surface, APP_TERMINAL, x + 8, y + 5, 12);
-    font_draw(surface, x + 26, y + 15, "klye-sh",
-              THEME_TERMINAL_DIM, 1);
-    font_draw_right(surface, x + width - 10, y + 15, "zsh",
-                    THEME_TERMINAL_DIM, 1);
+    font_draw(surface, x + 26, y + 12, "klye-sh",
+              THEME_TERMINAL_DIM, TEXT_SCALE);
+    font_draw_right(surface, x + width - 10, y + 12, "zsh",
+                    THEME_TERMINAL_DIM, TEXT_SCALE);
 
     rows = (height - TERMINAL_HEADER - TERMINAL_PAD_Y * 2) /
            TERMINAL_LINE_HEIGHT;
-    columns = (width - TERMINAL_PAD_X * 2) / FONT_ADVANCE;
+    columns = (width - TERMINAL_PAD_X * 2) / TEXT_ADVANCE;
     if (rows < 1) {
         rows = 1;
     }
@@ -816,7 +843,7 @@ void terminal_draw(struct gfx_surface *surface, int x, int y, int width,
     for (int row = 0; row < rows; ++row) {
         int line_index = first + row;
         int baseline = y + TERMINAL_HEADER + TERMINAL_PAD_Y +
-                       row * TERMINAL_LINE_HEIGHT + FONT_ASCENT;
+                       row * TERMINAL_LINE_HEIGHT + TEXT_ASCENT;
         int length;
 
         if (line_index >= term_count) {
@@ -839,10 +866,10 @@ void terminal_draw(struct gfx_surface *surface, int x, int y, int width,
             if (!blink || length >= columns) {
                 continue;
             }
-            cursor_x = x + TERMINAL_PAD_X + term_cursor_column * FONT_ADVANCE;
+            cursor_x = x + TERMINAL_PAD_X + term_cursor_column * TEXT_ADVANCE;
             cursor_y = y + TERMINAL_HEADER + TERMINAL_PAD_Y +
                        row * TERMINAL_LINE_HEIGHT;
-            gfx_fill(surface, cursor_x, cursor_y, FONT_ADVANCE,
+            gfx_fill(surface, cursor_x, cursor_y, TEXT_ADVANCE,
                      TERMINAL_LINE_HEIGHT - 2, THEME_TERMINAL_CURSOR);
             if (term_cursor_column < term_lengths[line_index]) {
                 char cell[2];
@@ -850,7 +877,7 @@ void terminal_draw(struct gfx_surface *surface, int x, int y, int width,
                 cell[0] = term_lines[line_index][term_cursor_column];
                 cell[1] = '\0';
                 font_draw(surface, cursor_x, baseline, cell,
-                          THEME_TERMINAL_BG, 1);
+                          THEME_TERMINAL_BG, TEXT_SCALE);
             }
             continue;
         }
@@ -887,8 +914,9 @@ static void terminal_draw_line(struct gfx_surface *surface, int x, int baseline,
                 piece[index - start] = term_lines[line_index][index];
             }
             piece[run - start] = '\0';
-            font_draw(surface, x + start * FONT_ADVANCE, baseline, piece,
-                      terminal_palette[attribute % TERM_COLOR_COUNT], 1);
+            font_draw(surface, x + start * TEXT_ADVANCE, baseline, piece,
+                      terminal_palette[attribute % TERM_COLOR_COUNT],
+                      TEXT_SCALE);
         }
         start = run;
     }
@@ -1333,7 +1361,7 @@ void editor_draw(struct gfx_surface *surface, int x, int y, int width,
         edit_top_line = 0;
     }
     text_x = x + EDITOR_GUTTER + 8;
-    columns = (width - EDITOR_GUTTER - 16) / FONT_ADVANCE;
+    columns = (width - EDITOR_GUTTER - 16) / TEXT_ADVANCE;
     if (columns < 8) {
         columns = 8;
     }
@@ -1341,7 +1369,7 @@ void editor_draw(struct gfx_surface *surface, int x, int y, int width,
     for (int row = 0; row < rows; ++row) {
         int line_index = edit_top_line + row;
         int top = y + EDITOR_PAD_Y + row * EDITOR_LINE_HEIGHT;
-        int baseline = top + FONT_ASCENT;
+        int baseline = top + TEXT_ASCENT;
         int length;
 
         if (line_index >= edit_count) {
@@ -1383,11 +1411,11 @@ void editor_draw(struct gfx_surface *surface, int x, int y, int width,
         }
         if (length > 0) {
             font_draw(surface, text_x, baseline, edit_lines[line_index],
-                      THEME_TEXT_PRIMARY, 1);
+                      THEME_TEXT_PRIMARY, TEXT_SCALE);
         }
         if (line_index == edit_cursor_line && edit_cursor_column < columns &&
             blink) {
-            int cursor_x = text_x + edit_cursor_column * FONT_ADVANCE;
+            int cursor_x = text_x + edit_cursor_column * TEXT_ADVANCE;
 
             gfx_fill(surface, cursor_x, top + 1, 2, EDITOR_LINE_HEIGHT - 3,
                      THEME_ACCENT);
@@ -1407,8 +1435,8 @@ void editor_draw(struct gfx_surface *surface, int x, int y, int width,
         status[offset++] = edit_modified ? '*' : ' ';
         status[offset++] = ' ';
         status[offset] = '\0';
-        font_draw(surface, x + 10, y + body_height + 14, status,
-                  THEME_TEXT_SECONDARY, 1);
+        font_draw(surface, x + EDITOR_PAD_X, y + body_height + 14, status,
+                  THEME_TEXT_SECONDARY, TEXT_SCALE);
     }
     {
         char position[40];
@@ -1437,8 +1465,9 @@ void editor_draw(struct gfx_surface *surface, int x, int y, int width,
         }
         position[offset++] = ' ';
         position[offset] = '\0';
-        font_draw_right(surface, x + width - 10, y + body_height + 14,
-                        position, THEME_TEXT_SECONDARY, 1);
+        font_draw_right(surface, x + width - EDITOR_PAD_X,
+                        y + body_height + 14, position, THEME_TEXT_SECONDARY,
+                        TEXT_SCALE);
     }
 }
 

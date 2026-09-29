@@ -931,18 +931,25 @@ static void draw_dock(struct gfx_surface *surface)
 
 static void window_content_size(enum app_id app, int *width, int *height)
 {
+    /* Sized for the text scale, not for a 1x font.
+     *
+     * A window is a fixed number of pixels, so doubling the text halves the
+     * cells that fit across it: the terminal was 820 wide, which is 100 cells
+     * at 8 pixels and 48 at 16.  Anything that wants a prompt, a command and
+     * some output on one line was wrapping, and a wrapped neofetch drew its
+     * logo down the screen one fragment per line. */
     switch (app) {
     case APP_TERMINAL:
-        *width = 820;
-        *height = 480;
+        *width = 1120;
+        *height = 600;
         break;
     case APP_EDITOR:
-        *width = 760;
-        *height = 480;
+        *width = 1000;
+        *height = 600;
         break;
     case APP_FILES:
-        *width = 680;
-        *height = 440;
+        *width = 860;
+        *height = 520;
         break;
     case APP_SETTINGS:
         *width = 620;

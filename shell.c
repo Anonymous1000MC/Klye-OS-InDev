@@ -1595,6 +1595,10 @@ static const char *const neofetch_logo[] = {
 static void neofetch_line(int row, const char *value)
 {
     terminal_puts(neofetch_logo[row]);
+    /* four spaces, not two: the logo is 20 characters, which is 320 pixels at
+     * the text scale the interface draws at, and a two space gap put the
+     * summary's first characters in the logo's own column and wrapped the
+     * line mid word. */
     terminal_puts("  ");
     if (value != 0) {
         terminal_puts(value);
@@ -1650,7 +1654,7 @@ static void cmd_neofetch(void)
     neofetch_line(0, value);
 
     at = 0;
-    text_copy(value + at, "OS: Klye OS 0.2 (x86_64)", (int)sizeof(value) - at);
+    text_copy(value + at, "OS: Klye OS 0.2 x86_64", (int)sizeof(value) - at);
     neofetch_line(1, value);
 
     at = 0;
@@ -1672,7 +1676,7 @@ static void cmd_neofetch(void)
 
     shell_row("", "", 0);
     at = 0;
-    text_copy(value + at, "CPU: x86_64 (QEMU Virtual CPU 2.5+), 1 core",
+    text_copy(value + at, "CPU: QEMU Virtual CPU 2.5+, 1 core",
               (int)sizeof(value) - at);
     shell_row("", value, 0);
 
