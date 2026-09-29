@@ -940,16 +940,16 @@ static void window_content_size(enum app_id app, int *width, int *height)
      * logo down the screen one fragment per line. */
     switch (app) {
     case APP_TERMINAL:
-        *width = 1120;
-        *height = 600;
+        *width = 860;
+        *height = 500;
         break;
     case APP_EDITOR:
-        *width = 1000;
-        *height = 600;
+        *width = 780;
+        *height = 500;
         break;
     case APP_FILES:
-        *width = 860;
-        *height = 520;
+        *width = 680;
+        *height = 440;
         break;
     case APP_SETTINGS:
         *width = 620;

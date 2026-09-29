@@ -19,11 +19,14 @@
  * glyphs get taller and the rows do not, and text starts overlapping the row
  * above with nothing to explain it.
  *
- * 2 is the smallest scale at which an 8x8 bitmap font stops reading as a grid
- * of blocks.  At 1 the pixel grid is the dominant feature of every label in
- * the interface, which is what made the whole desktop look like it was drawn
- * on graph paper. */
-#define TEXT_SCALE 2
+ * 1, drawn one font pixel to one screen pixel.
+ *
+ * Scale 2 was tried and is wrong here: an 8x8 bitmap doubled looks like a
+ * mosaic, and interpolating it to hide that made the glyphs soft and the text
+ * looked smeared.  Filtering the glyphs is a way to make a bitmap font larger
+ * than it is, not a way to make it better, and at 1:1 the glyphs are exactly
+ * the shape they were drawn as. */
+#define TEXT_SCALE 1
 #define TEXT_ADVANCE (FONT_ADVANCE * TEXT_SCALE)
 #define TEXT_ASCENT (FONT_ASCENT * TEXT_SCALE)
 #define TEXT_HEIGHT (FONT_LINE_HEIGHT * TEXT_SCALE)
@@ -38,7 +41,7 @@
  * It has to be generous enough for the widest line anything prints at the
  * current text scale, and the window is wide enough to show that many, so the
  * two are kept in step by deriving both from the same numbers. */
-#define TERMINAL_LOGICAL_COLS 72
+#define TERMINAL_LOGICAL_COLS 92
 #define TERMINAL_LINE_HEIGHT (12 * TEXT_SCALE)
 #define TERMINAL_PAD_X (10 * TEXT_SCALE)
 #define TERMINAL_PAD_Y (8 * TEXT_SCALE)
