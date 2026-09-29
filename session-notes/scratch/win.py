@@ -1,12 +1,15 @@
-import sys
-path=sys.argv[1]; x0,y0,x1,y1,sx,sy=map(int,sys.argv[2:8])
-f=open(path,'rb'); f.readline(); w,h=map(int,f.readline().split()); f.readline(); d=f.read()
-def px(x,y):
-    o=(y*w+x)*3; return (d[o],d[o+1],d[o+2])
-sh=' .:-=+*#%@'
-for y in range(y0,min(y1,h),sy):
-    row=''
-    for x in range(x0,min(x1,w),sx):
-        c=px(x,y)
-        row+=sh[min(9,((c[0]*3+c[1]*6+c[2])//10)*9//255)]
-    print(row)
+import sys, time, subprocess
+sys.path.insert(0, 'tools')
+from qemu_harness import Guest, kill_all
+kill_all()
+m = Guest('win', disk=None)
+try:
+    m.boot()
+    m.run(['elf /bin/hello.elf'], settle=6.0)
+    time.sleep(1)
+    for sym in ('vm_user_base','vm_user_next','vm_user_limit','vm_window_base','vm_window_limit'):
+        out = m.gdb(['(long)%s' % sym])
+        for l in out.splitlines():
+            if l.startswith('$'): print(sym, l)
+finally:
+    m.shutdown()
