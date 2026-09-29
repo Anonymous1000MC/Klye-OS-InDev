@@ -397,3 +397,59 @@ The next thing to measure is what musl computes for the TLS block: AT_PHDR as
 we set it, the PT_TLS header it should be pointing at, and whether mmap or brk
 is what it asked for. mmap is the obvious missing piece regardless, and it is
 the one thing a real program cannot do without.
+
+## musl does NOT self-relocate -- the opposite of glibc
+
+The one relocation musl's static PIE carries:
+
+    .rela.dyn: 1 entry
+      0000000000003fe0  R_X86_64_RELATIVE  addend 3eb0
+
+  target 0x3fe0 is in .got; the addend 0x3eb0 is the first byte of the fourth
+  PT_LOAD, which is RW -- so the "the GOT is not writable" theory is out, that
+  segment is mapped RW and every user page in this kernel is PTE_WRITE anyway.
+
+There is no self-relocation routine in the binary. No __relocate_self, no
+reference to .rela.iplt, nothing in the symbol table matching "reloc" or
+"rela". The GOT slot is read with a plain RIP-relative load inside __init_tls:
+
+    19a9: mov 0x2630(%rip),%rdx   # 3fe0
+
+So the slot must already hold bias + 0x3eb0 when musl gets there, and musl
+expects the kernel to have put it there.
+
+This is the exact inverse of glibc, which carries _dl_relocate_static_pie and
+calls it from __libc_start_main. The earlier decision to leave the relocation
+pass empty was right for glibc and wrong in general: it was generalised from
+one binary to all of them.
+
+So the rule is per-binary and cannot be decided by looking at the file type. The
+honest options are:
+
+- apply R_X86_64_RELATIVE always, and accept that a self-relocating binary gets
+  each entry twice -- wrong by the bias. glibc would break; musl would work.
+- apply it never, and accept that musl cannot start. glibc works; musl does not.
+- detect it. Something in the binary distinguishes "has a self-relocation
+  routine" from "does not", and that test is what is actually needed.
+
+Tried the first and measured: musl's rbx stayed 0x1B00000000 and the fault did
+not move, so applying the entry did not even fix musl. Which means the
+relocation is not the whole of it, or the bias the program derives is still
+wrong. Reverted rather than shipped, because it regresses the glibc case that
+currently works.
+
+The register dump at the fault is the durable finding:
+
+    rbx 1B00000000   rdi 160A93 (before) / 160AAF (after the relocation)
+    rax 1B00000038   cr2 1B00000038   write, not present
+
+0x160A93 is a link-time address. 0x1B00000000 is 27 * 2^32 and is not
+explainable from anything the loader produced.
+
+Still open, in order of what would rule the most out at once:
+
+1. what arithmetic in __init_tls produces 0x1B00000000 from a link-time
+   pointer, since that is the single number that has to be explained
+2. whether __init_tls's TLS size comes from a PT_TLS header found through
+   AT_PHDR, and whether AT_PHDR = bias + e_phoff is what musl's parser wants
+3. the mmap that musl skips behind a size test at the moment
