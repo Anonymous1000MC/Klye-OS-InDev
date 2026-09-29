@@ -50,6 +50,25 @@ void app_draw_icon(struct gfx_surface *surface, enum app_id app, int x, int y,
 
 void terminal_reset(void);
 void terminal_puts(const char *text);
+
+/* Set the colour subsequent characters are written in, as an index into the
+ * terminal palette: 0 default, 1 dim, 2 prompt, 3 accent, 4 green, 5 red,
+ * 6 orange, 7 purple, 8 teal, 9 indigo, 10 blue, 13 bright, 15 muted.
+ *
+ * An ESC [ <n> m sequence in the text does the same thing, so a program that
+ * emits its own escape sequences colours itself without calling this. */
+void terminal_set_color(uint8_t color);
+uint8_t terminal_color(void);
+
+/* Scroll the view by lines, for the mouse wheel.  Positive scrolls back into
+ * the history, negative scrolls towards the newest output.  Clamped to the
+ * history, and any new output snaps back to the bottom. */
+void terminal_scroll(int lines);
+
+/* How far the view is scrolled back from the newest output, in lines.  The
+ * caller needs it to know when a redraw is worth doing: scrolling changes
+ * neither the line count nor the cursor. */
+int terminal_scroll_offset(void);
 void terminal_write(const char *text, int length);
 void terminal_error(void);
 void terminal_printf_number(uint64_t value);

@@ -31,7 +31,51 @@
 
 static bool app_open_flags[APP_COUNT];
 
+/* Terminal colours.
+ *
+ * Sixteen slots, addressed by an escape sequence's parameter, plus a default
+ * that everything starts in.  A terminal that can only be one colour per line
+ * cannot show a prompt and a path and an error on the same line without
+ * picking one, which is why the old one derived its colour from a per-line
+ * flag: one colour, decided by what kind of line it was.
+ *
+ * The palette is the theme's own, so the terminal cannot drift from the rest
+ * of the desktop. */
+#define TERM_COLOR_DEFAULT 0U
+#define TERM_COLOR_COUNT   16U
+
+static const uint32_t terminal_palette[TERM_COLOR_COUNT] = {
+    THEME_TERMINAL_TEXT,    /*  0 default          */
+    THEME_TERMINAL_DIM,     /*  1 dim / comment    */
+    THEME_TERMINAL_PROMPT,  /*  2 prompt / info    */
+    THEME_TERMINAL_CURSOR,  /*  3 accent / ok      */
+    THEME_GREEN,            /*  4 green            */
+    THEME_RED,              /*  5 red / error      */
+    THEME_ORANGE,           /*  6 orange / warn    */
+    THEME_PURPLE,           /*  7 purple           */
+    THEME_TEAL,             /*  8 teal             */
+    THEME_INDIGO,           /*  9 indigo           */
+    THEME_ACCENT,           /* 10 blue             */
+    THEME_ACCENT_DEEP,      /* 11 deep blue        */
+    THEME_ACCENT_SOFT,      /* 12 pale blue        */
+    THEME_TEXT_ON_DARK,     /* 13 bright           */
+    THEME_TEXT_ON_DARK_DIM, /* 14 grey             */
+    THEME_TEXT_SECONDARY    /* 15 muted            */
+};
+
+/* The colour new text is written in, set by the last escape sequence seen. */
+static uint8_t terminal_color_current = TERM_COLOR_DEFAULT;
+/* Non zero while part way through an escape sequence, so a sequence split
+ * across two writes is not mistaken for text. */
+static int terminal_escape_state;
+static uint8_t terminal_escape_parameter;
+
 static char term_lines[TERMINAL_MAX_LINES][TERMINAL_MAX_COLS];
+/* One byte of colour attribute per character, so a line can be more than one
+ * colour.  The attribute is an index into terminal_palette, not a packed RGB:
+ * 108 lines of 108 cells is a lot of state to give up, and a palette index is
+ * one byte where an RGB triple is four. */
+static uint8_t term_attrs[TERMINAL_MAX_LINES][TERMINAL_MAX_COLS];
 static uint8_t term_lengths[TERMINAL_MAX_LINES];
 static uint8_t term_flags[TERMINAL_MAX_LINES];
 static int term_count;
@@ -225,6 +269,9 @@ static void terminal_new_line(uint8_t flags)
     term_lines[term_count][0] = '\0';
     term_lengths[term_count] = 0;
     term_flags[term_count] = flags;
+    /* the new line starts in the colour that is current, so a colour set
+     * before a newline carries across it rather than resetting on every line */
+    term_attrs[term_count][0] = terminal_color_current;
     term_cursor_line = term_count;
     term_cursor_column = 0;
     term_count++;
@@ -260,8 +307,65 @@ void terminal_clear(void)
 
 /* One character through the terminal, with the control characters handled the
  * way a tty would.  Shared by the string and counted forms. */
+/* An SGR escape sequence: ESC [ <params> m
+ *
+ * Only SGR is handled, and only the colour selectors.  Everything else is
+ * consumed and dropped rather than printed, so a program emitting a sequence
+ * this does not implement shows nothing rather than showing "^[[1m" on screen.
+ * A state machine rather than a scan for the terminating 'm', because the
+ * sequence can be split across two writes and a partial one is not a
+ * sequence. */
+static void terminal_sgr(uint8_t parameter)
+{
+    if (parameter < TERM_COLOR_COUNT) {
+        terminal_color_current = parameter;
+    } else if (parameter == 39U) {
+        terminal_color_current = TERM_COLOR_DEFAULT;
+    }
+    /* 0 resets, 1 bright, 22 normal intensity and 2x 30-37 / 90-97 map onto the
+     * palette above; the bold and dim variants are folded into their plain
+     * colours rather than inventing extra slots for them. */
+    if (parameter == 0U) {
+        terminal_color_current = TERM_COLOR_DEFAULT;
+    }
+}
+
 static void terminal_putc_raw(char character)
 {
+    if (terminal_escape_state != 0) {
+        if (character >= '0' && character <= '9') {
+            terminal_escape_parameter =
+                (uint8_t)(terminal_escape_parameter * 10U +
+                          (uint8_t)(character - '0'));
+            return;
+        }
+        if (character == 'm') {
+            terminal_sgr(terminal_escape_parameter);
+            terminal_escape_state = 0;
+            terminal_escape_parameter = 0;
+            return;
+        }
+        if (character == ';') {
+            /* a second parameter: apply the first and start again.  Only the
+             * first is honoured, which is enough for every sequence used
+             * here and is not worth a parameter array. */
+            terminal_sgr(terminal_escape_parameter);
+            terminal_escape_parameter = 0;
+            return;
+        }
+        if (character == '[') {
+            return; /* the introducer after ESC */
+        }
+        /* anything else ends the sequence, and is dropped */
+        terminal_escape_state = 0;
+        terminal_escape_parameter = 0;
+        return;
+    }
+    if (character == 0x1B) {
+        terminal_escape_state = 1;
+        terminal_escape_parameter = 0;
+        return;
+    }
     if (character == '\n') {
         terminal_new_line(TERMINAL_FLAG_OUTPUT);
         return;
@@ -284,10 +388,21 @@ static void terminal_putc_raw(char character)
         terminal_new_line(TERMINAL_FLAG_OUTPUT);
     }
     term_lines[term_cursor_line][term_cursor_column] = character;
+    term_attrs[term_cursor_line][term_cursor_column] = terminal_color_current;
     term_cursor_column++;
     term_lengths[term_cursor_line] = (uint8_t)term_cursor_column;
     term_lines[term_cursor_line][term_cursor_column] = '\0';
     term_flags[term_cursor_line] |= TERMINAL_FLAG_OUTPUT;
+}
+
+void terminal_set_color(uint8_t color)
+{
+    terminal_color_current = color < TERM_COLOR_COUNT ? color : TERM_COLOR_DEFAULT;
+}
+
+uint8_t terminal_color(void)
+{
+    return terminal_color_current;
 }
 
 void terminal_write(const char *text, int length)
@@ -344,33 +459,16 @@ static void terminal_backspace(void)
         term_lengths[term_cursor_line] = (uint8_t)term_cursor_column;
         return;
     }
-    /* At the start of a line, backspace has to go back to the end of the one
-     * above rather than stop.  A terminal does not have lines of its own: it
-     * has a stream, and the cursor is a position in it, so deleting backwards
-     * from the first column of a line removes the newline and lands at the end
-     * of the previous one.
+    /* At column zero, backspace stops.
      *
-     * Returning instead is what made holding the key look like it had stopped
-     * working.  It had, at the left margin, which is where the prompt puts the
-     * cursor, so on a fresh line the very first backspace did nothing at all
-     * and the text above looked undeletable. */
-    if (term_cursor_line == 0) {
-        return;
-    }
-    {
-        int previous = term_cursor_line - 1;
-        int length = term_lengths[previous];
-
-        term_cursor_line = previous;
-        term_cursor_column = length;
-        /* The two lines are now one, so the old line's text has to be closed
-         * at the new cursor position -- the joined line is exactly the text of
-         * the previous line, with the new one appended, and the newline
-         * between them is what just went. */
-        term_lines[previous][length] = '\0';
-        term_lengths[previous] = (uint8_t)length;
-        term_count = term_cursor_line + 1;
-    }
+     * It used to join the line above, which is what a raw byte stream does and
+     * is wrong for this: the lines above the cursor are output.  Joining them
+     * meant holding backspace walked backwards through the scrollback eating
+     * the results of earlier commands, one whole line at a time, and there was
+     * no way to get them back.  A terminal that has already printed a line does
+     * not unprint it.
+     *
+     * The line being typed is the only thing backspace owns. */
 }
 
 static void terminal_submit(void)
@@ -536,6 +634,11 @@ void terminal_handle_key(const struct key_event *event)
         return;
     }
     term_lines[term_cursor_line][term_cursor_column] = character;
+    /* Typed text takes the current colour, so a command can be shown in the
+     * prompt colour by setting one before the line is submitted.  Without this
+     * the cell keeps whatever the line held when it was created, which for a
+     * line reused after a clear is a stale attribute rather than the default. */
+    term_attrs[term_cursor_line][term_cursor_column] = terminal_color_current;
     term_cursor_column++;
     term_lengths[term_cursor_line] = (uint8_t)term_cursor_column;
     term_lines[term_cursor_line][term_cursor_column] = '\0';
@@ -544,6 +647,28 @@ void terminal_handle_key(const struct key_event *event)
      * view to the bottom, so reading history and then typing a command lost the
      * history.  Only new output snaps back to the bottom, which is what a
      * terminal does. */
+}
+
+void terminal_scroll(int lines)
+{
+    int limit = term_count > 0 ? term_count - 1 : 0;
+
+    /* Positive is back into the history, which is the direction a wheel
+     * scrolls: pushing it up moves the view up, towards older lines.  Three
+     * lines a notch, so one wheel click is a readable amount rather than one
+     * line or half the screen. */
+    term_scroll_offset += lines * 3;
+    if (term_scroll_offset > limit) {
+        term_scroll_offset = limit;
+    }
+    if (term_scroll_offset < 0) {
+        term_scroll_offset = 0;
+    }
+}
+
+int terminal_scroll_offset(void)
+{
+    return term_scroll_offset;
 }
 
 int terminal_line_count(void)
@@ -596,6 +721,9 @@ bool terminal_has_output(void)
     return term_count > 1;
 }
 
+static void terminal_draw_line(struct gfx_surface *surface, int x, int baseline,
+                               int line_index, int columns);
+
 void terminal_draw(struct gfx_surface *surface, int x, int y, int width,
                    int height)
 {
@@ -632,7 +760,6 @@ void terminal_draw(struct gfx_surface *surface, int x, int y, int width,
         int line_index = first + row;
         int baseline = y + TERMINAL_HEADER + TERMINAL_PAD_Y +
                        row * TERMINAL_LINE_HEIGHT + FONT_ASCENT;
-        uint32_t color = THEME_TERMINAL_TEXT;
         int length;
 
         if (line_index >= term_count) {
@@ -642,20 +769,17 @@ void terminal_draw(struct gfx_surface *surface, int x, int y, int width,
         if (length > columns) {
             length = columns;
         }
-        if ((term_flags[line_index] & TERMINAL_FLAG_COMMAND) != 0U) {
-            color = THEME_TERMINAL_PROMPT;
-        } else if ((term_flags[line_index] & TERMINAL_FLAG_ERROR) != 0U) {
-            color = THEME_TRAFFIC_CLOSE;
-        } else if ((term_flags[line_index] & TERMINAL_FLAG_OUTPUT) == 0U) {
-            color = THEME_TERMINAL_DIM;
-        }
+        /* The colour of a character is whatever was in effect when it was
+         * written, stored per cell.  A per-line colour cannot do this: a
+         * prompt and its path and an error on the same line are one colour or
+         * the other, and the line is the smallest thing that can be coloured. */
         if (line_index == term_cursor_line) {
             int cursor_x;
             int cursor_y;
 
-            font_draw(surface, x + TERMINAL_PAD_X, baseline,
-                      term_lines[line_index], color, 1);
-            if (!blink || (int)term_lengths[line_index] >= columns) {
+            terminal_draw_line(surface, x + TERMINAL_PAD_X, baseline,
+                               line_index, columns);
+            if (!blink || length >= columns) {
                 continue;
             }
             cursor_x = x + TERMINAL_PAD_X + term_cursor_column * FONT_ADVANCE;
@@ -673,21 +797,43 @@ void terminal_draw(struct gfx_surface *surface, int x, int y, int width,
             }
             continue;
         }
-        if (length > 0) {
-            font_draw(surface, x + TERMINAL_PAD_X, baseline,
-                      term_lines[line_index], color, 1);
-        }
+        terminal_draw_line(surface, x + TERMINAL_PAD_X, baseline, line_index,
+                           columns);
     }
-    if (term_scroll_offset > 0) {
-        char banner[32];
+}
 
-        banner[0] = '[';
-        banner[1] = (char)('0' + (term_scroll_offset / 10) % 10);
-        banner[2] = (char)('0' + term_scroll_offset % 10);
-        banner[3] = ']';
-        banner[4] = '\0';
-        font_draw(surface, x + width - 60, y + 15, banner,
-                  THEME_TERMINAL_PROMPT, 1);
+/* Draw one line, a run of characters at a time in whatever colour they share.
+ *
+ * A character at a time is the obvious way and it is slow enough to show: a
+ * full screen is over a thousand calls, and the font blitter is not cheap.
+ * Consecutive characters with the same attribute almost always come in one
+ * run, so the runs are what get drawn. */
+static void terminal_draw_line(struct gfx_surface *surface, int x, int baseline,
+                               int line_index, int columns)
+{
+    int length = term_lengths[line_index];
+
+    if (length > columns) {
+        length = columns;
+    }
+    for (int start = 0; start < length;) {
+        uint8_t attribute = term_attrs[line_index][start];
+        int run = start;
+
+        while (run < length && term_attrs[line_index][run] == attribute) {
+            run++;
+        }
+        {
+            char piece[TERMINAL_MAX_COLS];
+
+            for (int index = start; index < run; ++index) {
+                piece[index - start] = term_lines[line_index][index];
+            }
+            piece[run - start] = '\0';
+            font_draw(surface, x + start * FONT_ADVANCE, baseline, piece,
+                      terminal_palette[attribute % TERM_COLOR_COUNT], 1);
+        }
+        start = run;
     }
 }
 

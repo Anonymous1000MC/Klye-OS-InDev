@@ -296,6 +296,7 @@ void gui_cli_task(uint64_t argument)
 {
     int last_lines = -1;
     int last_column = -1;
+    int last_scroll = -1;
 
     (void)argument;
     for (;;) {
@@ -308,9 +309,34 @@ void gui_cli_task(uint64_t argument)
             lines = terminal_line_count();
             column = terminal_cursor_column();
         }
-        if (lines != last_lines || column != last_column) {
+        /* The wheel scrolls, and only the terminal consumes it: the window
+         * manager reads the same queue for dragging and clicking, and a
+         * detent that moved a window would be a surprise.  Positive is away
+         * from the user, which scrolls back into the history. */
+        {
+            struct mouse_event mouse;
+            int scrolled = 0;
+
+            while (input_poll_mouse(&mouse)) {
+                if (mouse.wheel != 0) {
+                    terminal_scroll(mouse.wheel);
+                    scrolled = 1;
+                }
+            }
+            if (scrolled != 0) {
+                lines = terminal_line_count();
+                column = terminal_cursor_column();
+            }
+        }
+        /* Scrolling does not change the line count or the cursor, so the
+         * redraw has to notice it separately.  Without the third term here a
+         * wheel event moved the view and nothing was drawn until the next
+         * keystroke, which made the wheel look like it did nothing at all. */
+        if (lines != last_lines || column != last_column ||
+            terminal_scroll_offset() != last_scroll) {
             last_lines = lines;
             last_column = column;
+            last_scroll = terminal_scroll_offset();
             cli_render();
         }
         if (shell_reboot_pending()) {

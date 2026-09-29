@@ -54,7 +54,10 @@ static volatile uint32_t mouse_write;
 static uint16_t modifiers;
 static bool extended_pending;
 static bool release_pending;
-static uint8_t mouse_packet[3];
+static uint8_t mouse_packet[4];
+/* True once the mouse has agreed to the wheel device id, which means its
+ * packets are four bytes.  Until then they are three. */
+static bool ps2_mouse_wheel;
 static uint8_t mouse_packet_index;
 static uint8_t previous_buttons;
 static bool mouse_liveness_reported;
@@ -453,6 +456,12 @@ void input_handle_scancode(uint8_t scancode)
 void input_handle_mouse_packet(int16_t delta_x, int16_t delta_y,
                               uint8_t raw_buttons)
 {
+    input_handle_mouse_wheel(delta_x, delta_y, 0, raw_buttons);
+}
+
+void input_handle_mouse_wheel(int16_t delta_x, int16_t delta_y, int8_t wheel,
+                              uint8_t raw_buttons)
+{
     uint8_t buttons = 0;
 
     mouse_packet_count++;
@@ -470,14 +479,14 @@ void input_handle_mouse_packet(int16_t delta_x, int16_t delta_y,
         buttons |= MOUSE_BUTTON_RIGHT;
     }
     previous_buttons = buttons;
-    push_mouse(delta_x, delta_y, 0, buttons);
+    push_mouse(delta_x, delta_y, wheel, buttons);
 }
 
 static void collect_mouse_byte(void)
 {
     mouse_packet[mouse_packet_index++] = inb(0x60);
     mouse_irq_bytes++;
-    if (mouse_packet_index < 3U) {
+    if (mouse_packet_index < (ps2_mouse_wheel ? 4U : 3U)) {
         return;
     }
     mouse_packet_index = 0;
@@ -491,7 +500,22 @@ static void collect_mouse_byte(void)
         if ((mouse_packet[0] & 0x20U) != 0U) {
             dy = (int16_t)((int)dy - 256);
         }
+        if (ps2_mouse_wheel) {
+            int8_t wheel = (int8_t)(mouse_packet[3] & 0x0FU);
+
+            /* The wheel is a signed nibble: 0xF is one notch away from the
+             * user, not fifteen towards. */
+            if ((wheel & 0x08U) != 0U) {
+                wheel = (int8_t)((int)wheel - 16);
+            }
+            input_handle_mouse_wheel(dx, dy, wheel,
+                                     (uint8_t)(mouse_packet[0] |
+                                               (mouse_packet[3] & 0x30U)));
+            mouse_packet_index = 0;
+            return;
+        }
         input_handle_mouse_packet(dx, dy, mouse_packet[0]);
+        mouse_packet_index = 0;
     }
 }
 
@@ -567,6 +591,27 @@ void input_init(void)
     ps2_ack_f4 = ack;
     (void)send_aux_command(0xF3);
     (void)send_aux_command(100);
+    (void)send_aux_command(0xF4);
+    /* Ask for the wheel explicitly rather than inferring it.
+     *
+     * The wheel arrives in a fourth byte of a packet, and a mouse without one
+     * never sends it.  Guessing is not safe: a first byte and a wheel byte
+     * overlap in every bit that identifies them, and treating a first byte as
+     * a wheel byte swallows the packet, which is how the keyboard stopped
+     * working when this was tried by inspection.
+     *
+     * So the device is asked.  The magic sample sequence selects sample rate,
+     * then a wheel device id, and a device that has a wheel agrees.  Having
+     * agreed, its packets are four bytes and can be dispatched on four.  One
+     * that does not agree keeps the three byte format and never sends the
+     * fourth, so its packets are dispatched on three. */
+    (void)send_aux_command(0xF3);
+    (void)send_aux_command(200);
+    (void)send_aux_command(0xF3);
+    (void)send_aux_command(80);
+    (void)send_aux_command(0xF3);
+    (void)send_aux_command(200);
+    ps2_mouse_wheel = send_aux_command(0xF3) == PS2_ACK_OK;
     (void)send_aux_command(0xF4);
     ps2_mouse_reporting = (ps2_config_byte & PS2_CONFIG_MOUSE_IRQ) != 0U;
     ps2_mouse_configured = ps2_mouse_reporting || ack == PS2_ACK_OK ||

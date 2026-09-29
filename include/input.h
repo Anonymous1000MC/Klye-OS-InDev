@@ -79,6 +79,11 @@ const char *input_key_name(uint16_t code);
 
 void input_handle_mouse_packet(int16_t delta_x, int16_t delta_y,
                               uint8_t buttons);
+
+/* As above, with the wheel: a signed count of detents, positive away from the
+ * user. */
+void input_handle_mouse_wheel(int16_t delta_x, int16_t delta_y, int8_t wheel,
+                              uint8_t buttons);
 void input_handle_scancode(uint8_t scancode);
 
 void input_keyboard_irq(void);
