@@ -309,8 +309,16 @@ static const char *const initial_environment[] = {
     0
 };
 
-/* Pairs in the auxiliary vector below, the terminating AT_NULL included. */
-#define ELF_AUX_PAIRS 10U
+/* Pairs in the auxiliary vector below, the terminating AT_NULL included.
+ *
+ * This has to be the number of pairs actually written at the bottom of this
+ * function, not an estimate.  It sizes the space the vector occupies, and
+ * AT_RANDOM's sixteen bytes are placed immediately after it, so one pair too
+ * few here puts those bytes on top of the last pair written -- which is the
+ * AT_NULL terminator.  A vector whose terminator has been overwritten with a
+ * random number is not a vector that ends: a library walking it runs off the
+ * end of the stack and faults. */
+#define ELF_AUX_PAIRS 11U
 
 /* Write eight bytes to a user address, by physical address.
  *
@@ -372,6 +380,7 @@ static uint64_t elf_build_stack(uint64_t stack_top, const char *program,
     uint64_t fixed_words;
     uint64_t words;
     uint64_t at;
+    uint64_t bottom;
     uint64_t strings;
     uint64_t string_cursor;
     uint64_t random_at;
@@ -404,6 +413,9 @@ static uint64_t elf_build_stack(uint64_t stack_top, const char *program,
     if (at + words * 8U > stack_top) {
         return 0;                      /* would run off the bottom */
     }
+    /* Remembered, because `at` walks upward as the layout is written and the
+     * stack pointer to return is this one, not wherever the walk finishes. */
+    bottom = at;
     strings = at + fixed_words * 8U;
     string_cursor = strings;
     random_at = at + (fixed_words - 2U) * 8U;
@@ -481,7 +493,20 @@ static uint64_t elf_build_stack(uint64_t stack_top, const char *program,
         at += __builtin_strlen(initial_environment[index]) + 1U;
     }
 
-    return strings - 8U;               /* rsp: the word below argv[0] */
+    /* The stack pointer is the *bottom* of the layout, where argc is.
+     *
+     * It was returned as strings - 8, on the reasoning that rsp is "the word
+     * below argv[0]".  argv[0] is the second word of the layout, so the word
+     * below it is the bottom -- but strings is not argv[0], it is where the
+     * strings were placed, hundreds of words up.  The program was therefore
+     * entered 200 bytes above its own argc, reading the middle of the
+     * auxiliary vector as argc, argv and envp.
+     *
+     * The symptom was a fault inside glibc's __libc_start_main walking envp
+     * looking for its NULL terminator, at a wild address: with argc and the
+     * argument pointers read out of the middle of the vector, the computed
+     * envp is nowhere near the one that was built. */
+    return bottom;
 }
 
 bool elf_run(const char *path)
