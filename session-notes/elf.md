@@ -453,3 +453,38 @@ Still open, in order of what would rule the most out at once:
 2. whether __init_tls's TLS size comes from a PT_TLS header found through
    AT_PHDR, and whether AT_PHDR = bias + e_phoff is what musl's parser wants
 3. the mmap that musl skips behind a size test at the moment
+
+## Resolved 2026-09-30: it was never the loader
+
+Everything above was a correct observation of a symptom the loader was not
+causing. `0x1B00000000` is `0x1B << 32` -- the SS half of the sysretq selector
+pair, which the return path was building in `%rbx` as scratch. Not arithmetic
+in `__init_tls`. Not a bias. Not a relocation. musl's `rbx` was holding a
+kernel constant because the kernel put it there on the way back.
+
+The final answer on relocations, which the three options above did not include:
+**neither binary needs the kernel to apply anything.** musl's `_start` passes
+`&_DYNAMIC` to `_start_c`, which relocates itself; glibc calls
+`_dl_relocate_static_pie`. Both self-relocate. So
+`elf_apply_internal_relocations` is empty *by design*, and the detection test
+that option 3 was reaching for turns out to be unnecessary -- a static-PIE Linux
+binary is not the case where the kernel does it.
+
+Two more return-path bugs surfaced immediately after, both in the same twenty
+instructions: FS base applied only on task entry (so `arch_prctl` took effect
+one syscall late), and `wrmsr` written as if the 64-bit base were 32 bits. See
+`ring3.md` for all four.
+
+musl now runs: `main` writes to stdout, returns 42, `exit_group`. The
+`0x160A93`/`0x160AAF` readings in the dumps above were a faulty fault-report,
+never a real register value.
+
+Still true and still open, in the new order:
+
+1. what rdi, rsi, rdx and r8 come back as -- four argument registers are
+   clobbered by the return path and no source of it has been found
+2. glibc's VEX/AVX wall, which is a QEMU limitation rather than a kernel one
+3. no file I/O whatsoever, so no real binary yet: no `openat`/`read`/`close`,
+   no fd table, no directory layout
+4. no file-backed `mmap` and no `munmap`, so no `ld.so` and no dynamic linking
+5. ET_EXEC at `0x400000` still collides with the loader's window

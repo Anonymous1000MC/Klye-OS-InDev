@@ -55,3 +55,60 @@ it was set. A fault is worth a lot more than a hang.
 - A trace `call` before the register save clobbered rax, so write arrived as
   "unknown syscall 16".
 - addq $16 after pushing 3 words: the third was never discarded.
+
+## The syscall return path, 2026-09-30
+
+Four bugs, all here, all of which looked like a fault somewhere else. This is
+the section that mattered most and it was the last one to break.
+
+1. **rbx used as scratch to build the sysretq selector pair.** One instruction
+   pair before handing control back, so it overwrote whatever the pops had just
+   restored. musl keeps its thread control block in rbx across the arch_prctl
+   that sets the thread pointer, so its next store went to a dead pointer. This
+   is why the fault looked like a bad load bias, a missing relocation and a
+   missing mmap, in that order. It was none of them. (`2452571`)
+
+2. **FS base applied only on task entry.** The single `wrmsr` sat on the iretq
+   path, which runs once when a task enters ring 3 and never again, so
+   `arch_prctl` took effect one syscall too late and the program's next
+   instruction read `%fs:0` at address 0. The comment above the slot already
+   claimed the base was applied "on the way in and on the way out"; the way-out
+   half was never written. (`3828b81`)
+
+3. **wrmsr ignoring the high half of the base.** The base is 64 bits and wrmsr
+   takes `edx:eax`, 32 bits each, so `edx` has to be bits 32:63 of it. It held
+   whatever `interrupt_dispatch` last returned, giving `0x3F800004138` for a
+   pointer that was `0x10000004138`. Zeroing edx is equally wrong -- it drops
+   the high half entirely, which is what my first attempt did. (`3545673`)
+
+4. **No scratch register at all, finally.** CS and SS are constants, so the
+   whole selector pair is one constant: `0x0023001B00000000` ORed with the
+   flags. That needs only rax and r11, which sysretq already takes. r10 had
+   been the scratch for (1) and was silently broken by it -- nothing had ever
+   checked r10, because the canary did not test it. (`0d6cb95`)
+
+### Still open: rdi, rsi, rdx, r8
+
+Canary reads `......GHIJ..` after a silent argument-less ENOSYS. Those four are
+caller-saved and a syscall must preserve them. Not yet explained.
+
+Ruled out: the canary (byte-accurate, setup and expected values verified to
+match); C writing the frame (`user.c` and `kernel.c` only *read* those four
+fields); a print in the path (gated behind strace, failures reproduce silently);
+push/pop symmetry (exact 15-register mirrors); the selector build (r10 was the
+one it touched, and r10 now passes).
+
+The failing set is exactly the SysV argument registers minus r9, minus r10 and
+minus rcx (which SYSCALL has already destroyed). Claude's theory -- the stub
+marshals syscall args into the C convention before saving -- matches the set
+perfectly. **The stub contains no such code**: the 15 pushes are the first
+thing it does and `rdi`/`rsi` are set only once the frame is complete. The
+theory fits the symptom and contradicts the source, so it is unsupported. Worth
+keeping as a shape to look for, not a conclusion.
+
+What is missing is the *values*. They were never successfully read out: two
+attempts to dump them through the guest failed, once by misreading the byte
+stream's position relative to the report line and once by picking up the marker
+text. Both produced numbers that disagreed with the pass/fail table, which is
+how the errors were caught. Next time: print them in-program as ASCII hex, not
+as binary through a `write()` that stops at NUL.
