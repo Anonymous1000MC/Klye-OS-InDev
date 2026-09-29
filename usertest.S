@@ -88,17 +88,6 @@ user_test_second:
  * that comes back wrong shows up as a letter rather than as a fault somewhere
  * downstream.
  */
-.macro CANARY_CHECK name, register, expected
-    movq \expected, %r11        # expected, into a register the ABI frees
-    cmpq %r11, \register
-    je 2f
-    movq $0x1, %rax
-    movq $1, %rdi
-    leaq canary_bad(%rip), %rsi
-    movq $1, %rdx
-    syscall
-2:
-.endm
 
 .globl user_canary_entry
 .type user_canary_entry, @function
@@ -127,20 +116,75 @@ user_canary_entry:
     syscall
 
     /* rax is the return value, which is allowed to differ, so it is not
-     * checked here.  Everything else is. */
-    CANARY_CHECK rbx, %rbx, $0x1111
-    CANARY_CHECK rbp, %rbp, $0x2222
-    CANARY_CHECK r12, %r12, $0x3333
-    CANARY_CHECK r13, %r13, $0x4444
-    CANARY_CHECK r14, %r14, $0x5A5A
-    CANARY_CHECK r15, %r15, $0x4446
-    CANARY_CHECK rdi, %rdi, $0x5555
-    CANARY_CHECK rsi, %rsi, $0x6666
-    CANARY_CHECK rdx, %rdx, $0x7777
-    CANARY_CHECK r8,  %r8,  $0x8888
-    CANARY_CHECK r9,  %r9,  $0x9999
-    CANARY_CHECK r10, %r10, $0xAAAA
-
+    /* Each check only ever touches %r11, which the ABI lets the kernel
+     * destroy, and one byte of a report table through a memory operand.
+     * A syscall per failure would have been the obvious way to report and
+     * would have destroyed the canaries it was reporting on: write(1,..)
+     * needs rax, rdi, rsi and rdx, three of which are themselves checked
+     * later, so the first failure would cascade and the count would stop
+     * meaning anything.  The table is in the blob, which is copied to
+     * user memory and mapped writable, so it can be written without a
+     * register.  A byte starts as '.' and becomes a letter on failure. */
+    movq $0x1111, %r11
+    cmpq %r11, %rbx
+    je 2f
+    orb $65, canary_report+0(%rip)
+2:
+    movq $0x2222, %r11
+    cmpq %r11, %rbp
+    je 2f
+    orb $66, canary_report+1(%rip)
+2:
+    movq $0x3333, %r11
+    cmpq %r11, %r12
+    je 2f
+    orb $67, canary_report+2(%rip)
+2:
+    movq $0x4444, %r11
+    cmpq %r11, %r13
+    je 2f
+    orb $68, canary_report+3(%rip)
+2:
+    movq $0x5A5A, %r11
+    cmpq %r11, %r14
+    je 2f
+    orb $69, canary_report+4(%rip)
+2:
+    movq $0x4446, %r11
+    cmpq %r11, %r15
+    je 2f
+    orb $70, canary_report+5(%rip)
+2:
+    movq $0x5555, %r11
+    cmpq %r11, %rdi
+    je 2f
+    orb $71, canary_report+6(%rip)
+2:
+    movq $0x6666, %r11
+    cmpq %r11, %rsi
+    je 2f
+    orb $72, canary_report+7(%rip)
+2:
+    movq $0x7777, %r11
+    cmpq %r11, %rdx
+    je 2f
+    orb $73, canary_report+8(%rip)
+2:
+    movq $0x8888, %r11
+    cmpq %r11, %r8
+    je 2f
+    orb $74, canary_report+9(%rip)
+2:
+    movq $0x9999, %r11
+    cmpq %r11, %r9
+    je 2f
+    orb $75, canary_report+10(%rip)
+2:
+    movq $1, %rax
+    movq $1, %rdi
+    leaq canary_report(%rip), %rsi
+    movq $11, %rdx
+    syscall
     movq $1, %rax
     movq $1, %rdi
     leaq canary_done(%rip), %rsi
@@ -153,6 +197,8 @@ user_canary_entry:
 1:
     jmp 1b
 
+canary_report:
+    .byte 0x2E, 0x2E, 0x2E, 0x2E, 0x2E, 0x2E, 0x2E, 0x2E, 0x2E, 0x2E, 0x2E
 canary_bad:
     .ascii "X"
 canary_done:
