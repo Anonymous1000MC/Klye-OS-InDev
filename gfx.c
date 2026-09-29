@@ -76,12 +76,22 @@ uint32_t gfx_blend(uint32_t background, uint32_t foreground, uint32_t alpha)
     uint32_t green;
     uint32_t blue;
 
-    red = div255((((background >> 16) & 0xFFU) * weight) +
-                 (((foreground >> 16) & 0xFFU) * inverse));
-    green = div255((((background >> 8) & 0xFFU) * weight) +
-                   (((foreground >> 8) & 0xFFU) * inverse));
-    blue = div255(((background & 0xFFU) * weight) +
-                  ((foreground & 0xFFU) * inverse));
+    /* `alpha` is how much of the foreground to show: 255 is the foreground on
+     * its own, 0 leaves the background alone.
+     *
+     * It used to be the other way round, weighting the background by alpha and
+     * the foreground by what was left over.  The name says opacity, every
+     * caller in the tree assumed it, and PNG stores its alpha channel the same
+     * way, so a fully transparent pixel came out as a fully opaque one and a
+     * caller asking for "mostly this colour" got mostly the old colour.  Two
+     * places had noticed and written 255U - strength to compensate, which is
+     * what made the convention look deliberate from a distance. */
+    red = div255((((foreground >> 16) & 0xFFU) * weight) +
+                 (((background >> 16) & 0xFFU) * inverse));
+    green = div255((((foreground >> 8) & 0xFFU) * weight) +
+                   (((background >> 8) & 0xFFU) * inverse));
+    blue = div255(((foreground & 0xFFU) * weight) +
+                  ((background & 0xFFU) * inverse));
 
     return (red << 16) | (green << 8) | blue;
 }
@@ -1105,7 +1115,7 @@ void gfx_tint_surface(struct gfx_surface *surface, int x, int y, int width,
             }
             existing = line[px];
             gfx_desaturate(existing, strength, &existing);
-            line[px] = gfx_blend(existing, tint, 255U - strength) & 0x00FFFFFFU;
+            line[px] = gfx_blend(existing, tint, strength) & 0x00FFFFFFU;
         }
     }
 }
@@ -1151,8 +1161,11 @@ void gfx_vignette(struct gfx_surface *surface, int x, int y, int width,
                     py >= (int)surface->height) {
                     continue;
                 }
+                /* 255 - amount, not amount: the tint is at its strongest in
+                 * the far corner, where amount is largest, and the blend wants
+                 * the corner to keep most of what is already there. */
                 line[px] = gfx_blend(line[px], PIXEL_RGB(0x30, 0x38, 0x48),
-                                     amount);
+                                     255U - amount);
             }
         }
     }

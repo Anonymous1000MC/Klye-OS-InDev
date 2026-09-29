@@ -109,6 +109,15 @@ else
     echo "skipping doom3d_test: no WAD at $WAD"
 fi
 
+# Blending, pinned at the two ends where an inverted alpha argument hides.
+$cc $cflags -c "$here/gfx_test.c" -o "$out/gfx_test.o"
+$cc $cflags -c "$here/../gfx.c" -o "$out/gfx.o"
+$cc "$out/gfx_test.o" "$out/gfx.o" "$out/stubs.o" -o "$out/gfx_test"
+if ! "$out/gfx_test"; then
+    echo "gfx_test FAILED"
+    status=1
+fi
+
 # PNG decoding, against a decode of the wallpaper made with zlib.  The window
 # bug this covers only shows up on an image larger than the 32 KiB DEFLATE
 # back reference window, so the small fixtures that came before it were all
