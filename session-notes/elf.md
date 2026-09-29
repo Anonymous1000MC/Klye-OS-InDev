@@ -341,3 +341,59 @@ The decision is therefore to stop on glibc and go to musl, which is small
 enough to reason about and whose startup does not lean on the vector
 initialisation paths. musl 1.2.6 is in the package repository; it needs to be
 installed with sudo, which is not available here.
+
+## musl, and why it is the right target
+
+musl 1.2.6 is installed (`musl-gcc` at /usr/bin/musl-gcc). It is the system
+musl, not a special build.
+
+### Getting a binary the loader will take
+
+Three attempts, and only the third works:
+
+- `musl-gcc -static` gives a clean ET_EXEC with no PT_INTERP, but linked at
+  0x400000, which collides with the kernel's own low mapping. The loader
+  refused it with "a large page covers this address" -- correct, and the reason
+  a non-PIE binary needs its link address to be free.
+- `musl-gcc -static-pie` still emits PT_INTERP for /lib/ld-musl-x86_64.so.1,
+  so the loader rejects it as dynamically linked.
+- `musl-gcc -nostartfiles -static -Wl,-pie -Wl,--no-dynamic-linker` with
+  musl's own `rcrt1.o` (which exists precisely for static PIE) gives a real
+  ET_DYN, entry 0x108f, no PT_INTERP, zero VEX instructions, and exactly one
+  R_X86_64_RELATIVE relocation that musl applies to itself.
+
+The full command, for next time:
+
+    musl-gcc -nostartfiles -static -Wl,-pie -Wl,--no-dynamic-linker \
+        -o out.elf /usr/lib/musl/lib/rcrt1.o /usr/lib/musl/lib/crti.o \
+        prog.c /usr/lib/musl/lib/crtn.o
+
+### Where it gets to
+
+Further than glibc did. musl runs its own startup, relocates itself, and
+reaches __init_tls, where it calls __set_thread_area -- the arch_prctl
+ARCH_SET_FS wrapper -- successfully, and then:
+
+    1ab7:  call  __set_thread_area
+    1abc:  test  %eax,%eax
+    1abe:  js    1b7c          # negative: error
+    1ac4:  je    1b70          # zero: a different path
+    1aca:  movl  $0x2,0x38(%rbx)   <- faults
+
+  exception : page fault, write, not present
+  rip       : image offset 0x1ACA
+  address   : 0x1B00000038
+
+rbx is 0x1B00000000, which is not a link-time address and not anything the
+loader produced. Two live suspects, in order:
+
+1. musl sizes its TLS block from the program headers it finds through AT_PHDR
+   and then has to get memory for it. mmap currently returns ENOSYS, and if
+   musl fell back to brk for that block the result would be a break value used
+   as a pointer.
+2. AT_PHDR or AT_ENTRY is off, so the PT_TLS it reads is the wrong one.
+
+The next thing to measure is what musl computes for the TLS block: AT_PHDR as
+we set it, the PT_TLS header it should be pointing at, and whether mmap or brk
+is what it asked for. mmap is the obvious missing piece regardless, and it is
+the one thing a real program cannot do without.
