@@ -192,18 +192,23 @@ static void glyph_draw(struct gfx_surface *surface, int x, int top,
     }
     for (int py = top; py < top + height; ++py) {
         int source_row = (py - top) / scale;
-        int covered = 0;
+        int empty;
 
         if (py < 0) {
             continue;
         }
-        /* how much ink this destination row covers, out of its full width */
+        /* A row with no ink in it is skipped whole.  Worth the pass over the
+         * row: most rows of most glyphs are empty at the top and bottom, and
+         * this is the common case in a screen full of text. */
         for (int column = 0; column < FONT_GLYPH_WIDTH; ++column) {
-            if ((row(source_row, column, source) & (1U << column)) != 0U) {
-                covered += scale;
+            if ((row(source_row, column, source) & (1U << column)) == 0U) {
+                empty = 1;
+            } else {
+                empty = 0;
+                break;
             }
         }
-        if (covered == 0) {
+        if (empty) {
             continue;
         }
         for (int column = 0; column < FONT_GLYPH_WIDTH; ++column) {
@@ -218,17 +223,24 @@ static void glyph_draw(struct gfx_surface *surface, int x, int top,
                 if (on) {
                     surface->pixels[(uint32_t)py * surface->pitch_pixels +
                                     (uint32_t)px] = color;
-                } else if (covered < width) {
-                    /* a partial row: blend the edges so a horizontal stem has
-                     * a soft end rather than a hard one */
-                    uint32_t *target =
-                        &surface->pixels[(uint32_t)py *
-                                         surface->pitch_pixels +
-                                         (uint32_t)px];
-                    uint32_t alpha = (uint32_t)(255 - (covered * 255 / width));
-
-                    *target = gfx_blend(*target, color, alpha);
                 }
+                /* The pixels with no ink in them are left alone.
+                 *
+                 * They used to be blended towards the text colour, with the
+                 * row's total coverage as the alpha, on the theory that it
+                 * gave a horizontal stem a soft end.  It blended the whole
+                 * destination row rather than the ends, so every glyph with
+                 * any ink in a row got the text colour washed across the full
+                 * width of its cell: a light rectangle behind every character,
+                 * wherever text is drawn.  The terminal, the menu bar, the
+                 * dock and the window titles all go through here, which is why
+                 * it looked like a fault in all of them at once.
+                 *
+                 * At 1:1 there is nothing to soften anyway -- an 8x8 glyph
+                 * either has a pixel in a cell or it does not, and a half
+                 * covered pixel at 1:1 is a lighter pixel, not a smoother
+                 * edge.  So the ink is drawn and nothing else is touched, and
+                 * text is crisp against whatever is behind it. */
             }
         }
     }
