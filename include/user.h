@@ -61,3 +61,8 @@ void user_enter(uint64_t entry, uint64_t stack);
 void syscall_entry(void);
 
 #endif
+
+/* Tell brk which region it may hand out, once the program's address space
+ * exists.  `start` is the first address of the heap and `end` the first address
+ * past it. */
+void user_set_heap(uint64_t start, uint64_t end);

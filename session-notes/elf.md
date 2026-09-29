@@ -173,3 +173,118 @@ what remained, and CR2 was zero simply because nothing had put anything there.
 
 The harness `gdb()` wrapper still prepends `print` to every command, so
 breakpoints and memory reads through it remain unreliable.
+
+## Scope: how far from real Linux programs
+
+An outside assessment put this nearer than my own 55% guess, and the evidence
+backs it up. The 55% conflated "runs ordinary static programs" with "runs
+everything"; those are different questions.
+
+- **Static, no threads/signals: ~75-80% done.** Remaining: .rela.dyn
+  relocations, the initial stack layout with a populated auxv, arch_prctl for
+  the FS base, and a brk bump allocator. After that a static binary is a
+  native program making raw syscalls.
+- **Threads, signals, dynamic linking: ~20-25% done.** clone, futex atomics,
+  signal frame delivery, PT_INTERP and shared-object dependencies. A separate
+  universe.
+
+### Relocations, measured on a real target
+
+Built a glibc `-static-pie` binary to develop against, since there is no musl
+on this host:
+
+    1125 relocations in .rela.dyn
+    1104 R_X86_64_RELATIVE
+      21 R_X86_64_IRELATIVE   (readelf prints the type as "IRELATIV")
+
+Both passes are needed. The ordering the outside advice gave is confirmed
+empirically rather than assumed:
+
+- all 1104 RELATIVE entries come first (rows 0..1103), then all 21 IRELATIVE
+  (rows 1104..1124). The compiler already groups them, so a single in-order
+  pass would happen to work -- but two explicit passes is the thing to rely on.
+- all 21 IRELATIVE target addresses fall **inside** the RELATIVE span: they
+  patch the same .data.rel.ro/.got region. An IFUNC resolver that reads a
+  global through one of those slots sees an unrelocated pointer if RELATIVE has
+  not already run, so the dependency is real and not a formality.
+
+### Correction: the kernel must NOT apply .rela.dyn
+
+An outside assessment recommended implementing R_X86_64_RELATIVE and
+R_X86_64_IRELATIVE in the kernel as the first build step. That would be wrong
+for a static PIE, and checking before implementing saved a large amount of work.
+
+The glibc `-static-pie` target relocates **itself**:
+
+    0000000000024b20 <_dl_relocate_static_pie>
+    _dl_relocate_static_pie_ifunc
+    __libc_start_main:
+      c5a4: call 24b20 <_dl_relocate_static_pie>
+
+`_dl_relocate_static_pie` is called from `__libc_start_main`, so the C runtime
+walks its own .rela.dyn after the kernel has mapped the segments and before it
+calls main. Linux's own kernel does not process relocations for ET_DYN static
+PIEs for exactly this reason.
+
+So applying them in elf.c would mean every one of the 1125 entries is applied
+once by the kernel and once again by glibc, the second application being wrong
+by the load bias. `elf_apply_internal_relocations()` stays empty, and now the
+comment says why with evidence rather than assertion.
+
+This makes the remaining work to a static libc binary smaller than it looks:
+auxv, arch_prctl for FS, and brk. No relocation pass at all.
+
+## Progress: a real glibc static-pie binary now starts
+
+A glibc `-static-pie` binary (944 KiB, 1125 relocations) now loads, gets a
+proper initial stack, and gets as far as executing glibc's own startup code.
+It has not reached main().
+
+Reached so far: mapped, entered, running at image offset 0xC584, with a mapped
+stack. It then faults on a wild pointer (0xFFF4B64F50) inside what is almost
+certainly `_dl_relocate_static_pie`, before issuing a single syscall. The value
+looks like a load bias computed against a link-time address, so the next thing
+to check is how the bias is derived at runtime -- not the relocation loop, which
+the binary does itself.
+
+### Fixed along the way
+
+- **Initial stack with a real auxv.** argc/argv/envp, the vector terminated by
+  AT_NULL, AT_RANDOM's sixteen bytes, and PATH. A library walks all of it with
+  no bounds, so every terminator has to be exactly where it is expected.
+- **The heap was mapped over the stack.** `heap_low` was computed from the
+  *entry pointer*, which points into the middle of the stack region, rather than
+  the top of it. A program that grew into it would have overwritten its own
+  arguments.
+- **AT_PHDR pointed at a page, not the table.** It must be bias + e_phoff. A
+  library handed the page reads the ELF header as fourteen program headers, so
+  e_phnum comes back as the first bytes of the magic. This did not change the
+  outcome here, but it was wrong independently and would have broken the first
+  libc that got past relocation.
+- **arch_prctl(ARCH_SET_FS) and brk**, so the thread pointer and heap exist.
+  MSR_FS_BASE is applied at both ring transitions rather than written once:
+  it is per-thread hardware state the CPU does not save across a switch by
+  itself, so a value set at startup would drift as soon as a second program ran
+  with a different stack. The wrmsr on the return path is placed *before* rcx
+  is loaded, because rcx is where sysretq takes its instruction pointer from.
+
+### The file size ceiling was 64 KiB, and it was in two places
+
+This is the bug behind "why is my wallpaper too big", and it was never one bug:
+
+1. `tools/mkvfs.c` wrote each file's size in **two bytes**. A 944,416-byte
+   binary was recorded as 26,912 -- its low sixteen bits -- and the kernel then
+   read that many bytes and treated the rest of the real content as the next
+   record's header. Nothing reported an error, because from the kernel's side
+   the file it built *was* the size the header said. Now four bytes on both
+   sides.
+2. `VFS_MAX_BLOCKS_PER_FILE` capped any one file at 256 KiB, so a file over
+   that was dropped from the mount entirely. Now 1 MiB.
+3. `tools/mkvfs.c` read file bodies into `unsigned char buffer[MAX_BODY]` on the
+   stack. Raising the cap turned that into a 2 MiB local and the tool died with
+   a segfault and no message. Now allocated to the file's actual size.
+4. `MAX_BODY` itself was 12 KiB, so anything larger was silently truncated on
+   the way in -- the original wallpaper failure.
+
+The recurring lesson, now four times: a limit that quietly truncates looks
+exactly like a limit that works, and every test asset happened to be under it.

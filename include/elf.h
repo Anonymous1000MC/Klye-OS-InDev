@@ -38,6 +38,13 @@
  * than here. */
 #define ELF_STACK_BYTES (64U * 1024U)
 
+/* The heap a program may grow into, reserved above its stack.
+ *
+ * brk moves a break inside a region the program owns; it does not map more on
+ * demand.  Reserving it up front costs address space and nothing else, and it
+ * means a program cannot grow its heap over a page another program is using. */
+#define ELF_HEAP_BYTES (4U * 1024U * 1024U)
+
 /* Load and start the ELF executable at `path`.
  *
  * Returns false and leaves a reason in elf_error() when anything is missing,

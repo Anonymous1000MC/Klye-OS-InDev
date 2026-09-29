@@ -16,7 +16,7 @@
 #define VFS_PATH_MAX 160
 #define VFS_BLOCK_SIZE 512
 #define VFS_TOTAL_BLOCKS 8192    /* 4 MiB of file data */
-#define VFS_MAX_BLOCKS_PER_FILE 512  /* 256 KiB in any one file */
+#define VFS_MAX_BLOCKS_PER_FILE 2048 /* 1 MiB in any one file */
 #define VFS_BODY_MAX 4096
 #define VFS_LIST_MAX 64
 

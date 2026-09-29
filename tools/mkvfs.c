@@ -20,7 +20,7 @@
 #define KIND_FILE 1U
 #define MAX_ENTRIES 256
 #define MAX_PATH 160
-#define MAX_BODY 12288
+#define MAX_BODY (4U * 1024U * 1024U)
 
 struct entry {
     char path[MAX_PATH];
@@ -47,8 +47,8 @@ static void add_entry(const char *path, int kind, const unsigned char *body,
         fail("too many entries", path);
     }
     if (body_len > MAX_BODY) {
-        fprintf(stderr, "mkvfs: warning: %s is %ld bytes, truncated to %d\n",
-                path, body_len, MAX_BODY);
+        fprintf(stderr, "mkvfs: warning: %s is %ld bytes, truncated to %lu\n",
+                path, body_len, (unsigned long)MAX_BODY);
         body_len = MAX_BODY;
     }
     slot = &entries[entry_count++];
@@ -143,15 +143,41 @@ static void walk(const char *fs_dir, const char *prefix)
             ++child_dir_count;
         } else if (S_ISREG(info.st_mode)) {
             FILE *in = fopen(child_fs, "rb");
-            unsigned char buffer[MAX_BODY];
+            /* Read the file's size and allocate for it.
+             *
+             * This used to be a buffer[MAX_BODY] on the stack, which was
+             * harmless while MAX_BODY was 12 KiB and is a stack overflow the
+             * moment it is raised: a 944 KiB binary as a 2 MiB local blew the
+             * 8 MiB default stack somewhere below the write and took the whole
+             * tool down with no message.  A heap allocation sized to the file
+             * costs what the file costs and cannot overflow. */
+            unsigned char *buffer;
+            long size;
             long got;
 
             if (in == NULL) {
                 fail("cannot read", child_fs);
             }
-            got = (long)fread(buffer, 1, sizeof(buffer), in);
+            if (fseek(in, 0, SEEK_END) != 0) {
+                fail("cannot size", child_fs);
+            }
+            size = ftell(in);
+            if (size < 0) {
+                fail("cannot size", child_fs);
+            }
+            rewind(in);
+            buffer = (size > 0) ? (unsigned char *)malloc((size_t)size) : NULL;
+            if (size > 0 && buffer == NULL) {
+                fail("out of memory reading", child_fs);
+            }
+            got = (size > 0) ? (long)fread(buffer, 1, (size_t)size, in) : 0L;
             fclose(in);
+            if (got != size) {
+                free(buffer);
+                fail("short read", child_fs);
+            }
             add_entry(child_prefix, KIND_FILE, buffer, got);
+            free(buffer);
         }
     }
 
@@ -235,13 +261,21 @@ int main(int argc, char **argv)
         unsigned char header[8];
         size_t path_len = strlen(entries[index].path);
 
+        /* path length in two bytes, then the file's size in four, then the
+         * kind.  The size used to be two bytes as well, which quietly made
+         * 64 KiB - 1 the largest file the image could describe: a 944 KiB
+         * binary was recorded as 26912 bytes, and the kernel then read that
+         * many bytes of it and treated the rest of the real content as the
+         * next record's header.  Nothing reported an error, because from the
+         * kernel's side the file it built was exactly the size the header
+         * said -- it just was not the file that went in. */
         header[0] = (unsigned char)(path_len & 0xFF);
         header[1] = (unsigned char)(path_len >> 8);
         header[2] = (unsigned char)(entries[index].body_len & 0xFF);
         header[3] = (unsigned char)((entries[index].body_len >> 8) & 0xFF);
-        header[4] = (unsigned char)entries[index].kind;
-        header[5] = 0;
-        header[6] = 0;
+        header[4] = (unsigned char)(entries[index].body_len >> 16);
+        header[5] = (unsigned char)(entries[index].body_len >> 24);
+        header[6] = (unsigned char)entries[index].kind;
         header[7] = 0;
         fputs("    /* ", out);
         emit_cstring(out, entries[index].path);

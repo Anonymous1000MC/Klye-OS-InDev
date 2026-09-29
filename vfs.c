@@ -446,8 +446,12 @@ static bool vfs_load_image(void)
             return false;
         }
         path_len = (uint32_t)cursor[0] | ((uint32_t)cursor[1] << 8);
-        body_len = (uint32_t)cursor[2] | ((uint32_t)cursor[3] << 8);
-        kind = cursor[4];
+        /* Four bytes for the size, matching tools/mkvfs.  Two bytes here made
+         * 64 KiB - 1 the largest describable file, and a bigger one was
+         * silently truncated to its low sixteen bits rather than refused. */
+        body_len = (uint32_t)cursor[2] | ((uint32_t)cursor[3] << 8) |
+                   ((uint32_t)cursor[4] << 16) | ((uint32_t)cursor[5] << 24);
+        kind = (uint32_t)cursor[6];
         cursor += 8;
         if ((uint32_t)(vfs_image_data + total - cursor) < path_len + body_len) {
             heap_free(scratch);

@@ -37,6 +37,18 @@ user_syscall_rflags:
 user_syscall_stack:
     .quad 0
 
+/* The thread pointer the user program set with arch_prctl(ARCH_SET_FS).
+ *
+ * Written here rather than into MSR_FS_BASE directly, and applied at the two
+ * transitions instead.  FS base is per-thread hardware state that the CPU does
+ * not save across a task switch by itself, so a value written once at startup
+ * would still be correct for a single program and wrong the moment a second
+ * one ran with a different stack.  Applying it on the way in and on the way out
+ * of ring 3 costs two instructions and cannot drift. */
+.globl user_fs_base_slot
+user_fs_base_slot:
+    .quad 0
+
 /* The kernel stack a syscall runs on, at a fixed address so the stub can
  * reach it without needing any data of its own to find it. */
 .align 16
@@ -133,6 +145,12 @@ user_enter:
      * syscall returns through, so they are set here. */
     movq %rdi, user_syscall_rip(%rip)
     movq $0x2, user_syscall_rflags(%rip)
+    /* The thread pointer belongs to the program, not to the kernel: apply it
+     * on the way in so the first instruction the program runs already sees its
+     * own thread local storage. */
+    movl $0xC0000100, %ecx      /* IA32_FS_BASE */
+    movq user_fs_base_slot(%rip), %rax
+    wrmsr
     call serial_marker_ptr_enter
     iretq
 
@@ -259,6 +277,14 @@ syscall_return:
      * stack.  Loading that stack pointer and then calling anything pushes the
      * return address onto it, and a push there is a write into the page above
      * the allocation: mapped, so no fault, and quietly wrong. */
+    /* The program's thread pointer again, on the way back to it.  Done before
+     * %rcx is loaded because wrmsr needs %ecx for the MSR number and rcx is
+     * where sysretq takes its instruction pointer from: doing it afterwards
+     * would overwrite the address being returned to. */
+    movl $0xC0000100, %ecx      /* IA32_FS_BASE */
+    movq user_fs_base_slot(%rip), %rax
+    wrmsr
+
     movq user_syscall_stack(%rip), %rbx
     movq user_syscall_rip(%rip), %rcx
     movq user_syscall_rflags(%rip), %r11

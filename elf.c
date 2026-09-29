@@ -250,25 +250,249 @@ static bool elf_load_segment(const char *path, const struct elf64_program_header
  *
  * ET_DYN is a static PIE: it is linked to run at some base and carries no
  * absolute addresses, everything being relative.  So nothing has to be
- * rewritten -- the program will do its own relocations against wherever it
- * lands -- but it does need to be told where that is, which is the load bias
- * in the auxiliary vector.
+ * rewritten -- but it does need to be told where that is, which is the load
+ * bias in the auxiliary vector.
  *
- * The relocations are therefore deliberately NOT applied here.  A static
- * PIE applies its own R_X86_64_RELATIVE entries in its startup code, because
- * the base is not known until load time.  Applying them here as well would
- * apply them twice, and the second application would be wrong by the bias. */
+ * The relocations are deliberately NOT applied here, and that is not an
+ * omission.  A static PIE applies its own: glibc's static-pie carries
+ * _dl_relocate_static_pie and calls it from __libc_start_main, so the C
+ * runtime walks its own .rela.dyn after the kernel has mapped the segments and
+ * before it reaches main.  Linux does not process relocations for these
+ * binaries for the same reason.
+ *
+ * Measured on a glibc -static-pie built to check, which has 1125 entries: 1104
+ * R_X86_64_RELATIVE followed by 21 R_X86_64_IRELATIVE, all 21 of them
+ * targeting addresses inside the span the RELATIVE ones patch.  Applying them
+ * here would mean each is applied once by the kernel and again by glibc, and
+ * the second application would be wrong by the load bias -- a data section
+ * pointing into the middle of nowhere, in a program that had otherwise loaded
+ * correctly.
+ *
+ * This was nearly implemented on the strength of advice that a static PIE does
+ * not self-relocate.  The advice was wrong; the symbol table said so. */
 static void elf_apply_internal_relocations(void)
 {
-    /* Intentionally empty; see above. */
+    /* Intentionally empty, and see above for why it has to stay that way. */
+    (void)elf_apply_internal_relocations;
+}
+
+/* Auxiliary vector entries.
+ *
+ * The handful that a C library reads during startup and treats as required.
+ * AT_RANDOM is not optional in practice: it points at sixteen bytes the
+ * library uses to seed its stack protector, so a zero there is read as a
+ * pointer to address zero. */
+#define AT_NULL    0
+#define AT_PHDR    3
+#define AT_PHENT   4
+#define AT_PHNUM   5
+#define AT_PAGESZ  6
+#define AT_BASE    7
+#define AT_ENTRY   9
+#define AT_UID     11
+#define AT_EUID    12
+#define AT_GID     13
+#define AT_EGID    14
+#define AT_HWCAP   16
+#define AT_RANDOM  25
+
+/* The environment a program starts with.
+ *
+ * Deliberately near empty.  Anything here is read by the C library during
+ * startup -- both musl and glibc walk envp looking for LD_PRELOAD, the locale
+ * and similar -- so a variable that means something to either of them would
+ * change how a program behaves before main runs.  PATH is the one worth
+ * having: a shell without it cannot find anything it is asked to run, and every
+ * program reads it as a plain string. */
+static const char *const initial_environment[] = {
+    "PATH=/bin:/usr/bin",
+    0
+};
+
+/* Pairs in the auxiliary vector below, the terminating AT_NULL included. */
+#define ELF_AUX_PAIRS 10U
+
+/* Write eight bytes to a user address, by physical address.
+ *
+ * The same reason the segment copy works this way: the kernel cannot store
+ * through a ring 3 virtual address, because the user window is not identity
+ * mapped.  Returns false when the address is not mapped, which is worth knowing
+ * rather than quietly writing somewhere else. */
+static bool elf_store(uint64_t virtual_address, uint64_t value)
+{
+    uint64_t physical = vm_to_physical(virtual_address);
+
+    if (physical == 0U) {
+        return false;
+    }
+    *((volatile uint64_t *)(uintptr_t)physical) = value;
+    return true;
+}
+
+static bool elf_store_aux(uint64_t *at, uint64_t type, uint64_t value)
+{
+    if (!elf_store(*at, type) || !elf_store(*at + 8U, value)) {
+        return false;
+    }
+    *at += 16U;
+    return true;
+}
+
+/* Build the stack a C library expects to be entered on.
+ *
+ * From low addresses up, at the moment control reaches the entry point:
+ *
+ *     argc              argument count
+ *     argv[0] ..        pointers to the argument strings
+ *     NULL              end of argv
+ *     envp[0] ..        pointers to the environment strings
+ *     NULL              end of envp
+ *     auxv pairs        (type, value), ended by AT_NULL
+ *     AT_RANDOM bytes   sixteen bytes the library seeds its protector from
+ *     strings           what argv and envp point at
+ *
+ * and rsp points at argc.  A library walks the two NULLs and then the vector
+ * with no bounds of any kind, so every one of them has to be exactly where it
+ * is expected.  A vector missing its terminator walks off the top of the stack;
+ * a missing NULL after argv means envp is read as a further argument, and the
+ * first "environment variable" is a wild pointer.
+ *
+ * The strings are written after the pointers that refer to them, and the
+ * cursor that tracks where each string will land advances in step with the
+ * pointers, so there is one place that decides the layout rather than two that
+ * have to agree about it.
+ *
+ * Returned is the stack pointer to enter the program on, or 0 if any of it
+ * could not be written. */
+static uint64_t elf_build_stack(uint64_t stack_top, const char *program,
+                                const struct elf64_header *header,
+                                uint64_t bias, uint64_t phdr_vaddr)
+{
+    uint32_t environment_count = 0U;
+    uint64_t fixed_words;
+    uint64_t words;
+    uint64_t at;
+    uint64_t strings;
+    uint64_t string_cursor;
+    uint64_t random_at;
+    uint32_t index;
+
+    while (initial_environment[environment_count] != 0) {
+        environment_count++;
+    }
+
+    /* Everything below the strings: argc, argv[0], argv's NULL, envp, envp's
+     * NULL, the vector, and the sixteen random bytes.  Counted exactly, so the
+     * strings land in a known place rather than wherever the arithmetic
+     * happened to leave them. */
+    fixed_words = 1U                                   /* argc */
+                + 1U                                   /* argv[0] */
+                + 1U                                   /* argv's NULL */
+                + (uint64_t)environment_count         /* envp */
+                + 1U                                   /* envp's NULL */
+                + 2ULL * ELF_AUX_PAIRS                /* auxv */
+                + 2U;                                  /* AT_RANDOM's bytes */
+    words = fixed_words + 64U;                         /* strings, generously */
+    if (words * 8U > ELF_STACK_BYTES) {
+        return 0;
+    }
+
+    /* Bottom of the layout, aligned down to sixteen.  The mask goes on the
+     * sum rather than on the top alone: the stack pointer is the bottom, so
+     * aligning only the top leaves the bottom misaligned by the remainder. */
+    at = (stack_top - words * 8U) & ~0xFULL;
+    if (at + words * 8U > stack_top) {
+        return 0;                      /* would run off the bottom */
+    }
+    strings = at + fixed_words * 8U;
+    string_cursor = strings;
+    random_at = at + (fixed_words - 2U) * 8U;
+
+    if (!elf_store(at, 1U)) {          /* argc: the program name only */
+        return 0;
+    }
+    at += 8U;
+    if (!elf_store(at, string_cursor)) {        /* argv[0] */
+        return 0;
+    }
+    string_cursor += __builtin_strlen(program) + 1U;
+    at += 8U;
+    if (!elf_store(at, 0U)) {          /* end of argv */
+        return 0;
+    }
+    at += 8U;
+    for (index = 0; index < environment_count; ++index) {
+        if (!elf_store(at, string_cursor)) {
+            return 0;
+        }
+        string_cursor += __builtin_strlen(initial_environment[index]) + 1U;
+        at += 8U;
+    }
+    if (!elf_store(at, 0U)) {          /* end of envp */
+        return 0;
+    }
+    at += 8U;
+
+    /* The auxiliary vector.
+     *
+     * AT_PHDR points at the program headers *as they are in memory*, which for
+     * a PIE means biased by the load address.  A library handed the unrelocated
+     * value reads its own headers from the wrong place, and every field in
+     * them -- the entry point included -- comes back wrong.
+     *
+     * AT_RANDOM is not optional in practice: it points at sixteen bytes the
+     * library reads to seed its stack protector, so a zero there is read as a
+     * pointer to address zero. */
+    if (!elf_store_aux(&at, AT_PHDR, bias + phdr_vaddr) ||
+        !elf_store_aux(&at, AT_PHENT, (uint64_t)header->phentsize) ||
+        !elf_store_aux(&at, AT_PHNUM, (uint64_t)header->phnum) ||
+        !elf_store_aux(&at, AT_PAGESZ, (uint64_t)VM_PAGE_BYTES) ||
+        !elf_store_aux(&at, AT_ENTRY, bias + header->entry) ||
+        !elf_store_aux(&at, AT_RANDOM, random_at) ||
+        !elf_store_aux(&at, AT_UID, 0U) ||
+        !elf_store_aux(&at, AT_EUID, 0U) ||
+        !elf_store_aux(&at, AT_GID, 0U) ||
+        !elf_store_aux(&at, AT_HWCAP, 0U) ||
+        !elf_store_aux(&at, AT_NULL, 0U)) {
+        return 0;
+    }
+
+    /* The sixteen bytes AT_RANDOM points at.  There is no entropy source here,
+     * so this is a fixed non-zero pattern rather than a claim of randomness;
+     * all zeroes would leave a stack protector that is trivially guessed. */
+    at = random_at;
+    for (index = 0; index < 2U; ++index) {
+        if (!elf_store(at, 0x9E3779B97F4A7C15ULL * (uint64_t)(index + 1U))) {
+            return 0;
+        }
+        at += 8U;
+    }
+
+    /* The strings, at the addresses the pointers above already name. */
+    at = strings;
+    if (!elf_store(at, (uint64_t)(uintptr_t)program)) {
+        return 0;
+    }
+    at += __builtin_strlen(program) + 1U;
+    for (index = 0; index < environment_count; ++index) {
+        if (!elf_store(at, (uint64_t)(uintptr_t)initial_environment[index])) {
+            return 0;
+        }
+        at += __builtin_strlen(initial_environment[index]) + 1U;
+    }
+
+    return strings - 8U;               /* rsp: the word below argv[0] */
 }
 
 bool elf_run(const char *path)
 {
     struct elf64_header header;
     uint64_t bias = 0;
-    uint64_t stack;
+    uint64_t stack = 0U;
+    uint64_t stack_region_top;
     uint64_t image_end = 0U;
+    uint64_t phdr_page = 0xFFFFFFFFFFFFFFFFULL;
+    bool have_phdr_page = false;
     int got;
     uint16_t index;
 
@@ -351,6 +575,15 @@ bool elf_run(const char *path)
         if (ph.vaddr + ph.memsz > image_end) {
             image_end = ph.vaddr + ph.memsz;
         }
+        /* The page the program header table itself lands on.  AT_PHDR has to
+         * point at the headers where they will be in memory, and they are only
+         * mapped because some segment covers them, so the page is the lowest
+         * one any segment starts on. */
+        if (!have_phdr_page ||
+            (ph.vaddr & ~(uint64_t)(VM_PAGE_BYTES - 1U)) < phdr_page) {
+            phdr_page = ph.vaddr & ~(uint64_t)(VM_PAGE_BYTES - 1U);
+            have_phdr_page = true;
+        }
     }
     /* Above the last segment, rounded up to a page, plus a gap.
      *
@@ -417,7 +650,41 @@ bool elf_run(const char *path)
          * the first address *past* the last usable byte, not a usable address
          * itself.  Sixteen byte aligned because that is what the ABI wants at
          * the point a program is entered. */
-        stack = high & ~0xFULL;
+        /* The top of the stack region, kept: the stack pointer returned by
+         * elf_build_stack points *into* the middle of it, and the heap goes
+         * above the whole thing rather than above that pointer.  Adding the
+         * size to the entry pointer instead would start the heap in the middle
+         * of the stack, and a program that grew into it would overwrite its
+         * own arguments. */
+        stack_region_top = high & ~0xFULL;
+        /* The entry stack is not just a stack pointer: a C library is entered
+         * on argc, argv, envp and an auxiliary vector, and walks all three with
+         * no bounds.  Built here, below the segments, and the pointer into the
+         * middle of it is what the program starts on. */
+        if (!have_phdr_page) {
+            elf_fail("the program has no loadable segment for its headers");
+            return false;
+        }
+        stack = elf_build_stack(stack_region_top, path, &header, bias,
+                                header.phoff);
+        if (stack == 0U) {
+            elf_fail("the initial stack could not be built");
+            return false;
+        }
+        /* A heap above the stack, reserved rather than grown: brk moves a break
+         * inside a region the program owns and does not map more on demand, so
+         * the region has to exist before the program asks for it. */
+        {
+            uint64_t heap_low = stack_region_top;
+            uint64_t heap_high = heap_low + ELF_HEAP_BYTES;
+
+            if (vm_user_map_at(heap_low & ~(uint64_t)(VM_PAGE_BYTES - 1U),
+                               (size_t)ELF_HEAP_BYTES) == 0) {
+                elf_fail(vm_error());
+                return false;
+            }
+            user_set_heap(heap_low, heap_high);
+        }
     }
 
     elf_report("entry", header.entry + bias);

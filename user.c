@@ -31,8 +31,73 @@ static uint64_t user_exit_code;
 /* Linux's syscall numbers, so that the numbering does not have to be changed
  * later when a real binary arrives.  Only the few a first program needs are
  * here. */
-#define SYS_WRITE 1
-#define SYS_EXIT  60
+#define SYS_WRITE     1
+#define SYS_MMAP      9
+#define SYS_BRK      12
+#define SYS_ARCH_PRCTL 158
+#define SYS_EXIT     60
+
+/* arch_prctl subcommands, and the one that matters here.
+ *
+ * ARCH_SET_FS is how a process sets the thread pointer: the base of its thread
+ * local storage.  It is not optional for a C library, because errno lives there
+ * and so does the stack protector's guard value, and both are touched during
+ * startup rather than at some point the program chooses.  A library that
+ * cannot set FS faults inside its own initialisation, before it has said
+ * anything useful. */
+#define ARCH_SET_FS 0x1002
+#define ARCH_GET_FS 0x1003
+#define ARCH_SET_GS 0x1001
+
+/* The thread pointer of the running user program, kept in a kernel global
+ * because MSR_FS_BASE is per-thread hardware state and there is one user
+ * program at a time.  The kernel's own FS is not this: writing the MSR here
+ * would repoint the kernel's own thread pointer at a user address, and the
+ * first kernel access to its TLS would read a user page. */
+/* The slot itself is defined in ring3.S, next to the other values the
+ * transitions need, so there is one copy of it. */
+extern volatile uint64_t user_fs_base_slot;
+#define user_fs_base user_fs_base_slot
+
+/* The program break, and the first address its heap may use.
+ *
+ * brk grows and shrinks a program's heap in one contiguous region, which Linux
+ * implements as a single mapping the kernel extends on demand.  Here the region
+ * is a fixed reservation the loader mapped, and brk only moves the break
+ * inside it: extending past the end is refused with the current break rather
+ * than mapping more, because a heap that can grow into whatever it likes is a
+ * way for one program to map over another's pages. */
+static uint64_t user_break;
+static uint64_t user_break_end;
+
+/* Called by the loader once the program's address space exists, so brk knows
+ * what region it is allowed to hand out. */
+void user_set_heap(uint64_t start, uint64_t end)
+{
+    user_break = start;
+    user_break_end = end;
+}
+
+static int user_do_brk(uint64_t wanted)
+{
+    if (wanted == 0U) {
+        return 0;                       /* asking, not telling */
+    }
+    /* A break below the start means shrink; the pages stay mapped, which is
+     * what Linux does too and is why a heap that shrinks and grows again does
+     * not have to be remapped. */
+    if (wanted < user_break_end && wanted >= user_break - (user_break & 0xFFFU)) {
+        user_break = wanted;
+        return 0;
+    }
+    if (wanted > user_break_end) {
+        /* Out of the region.  Report where the break actually is, which is
+         * what Linux does and is what a library checks. */
+        return (int)user_break;
+    }
+    user_break = wanted;
+    return 0;
+}
 
 static const char *hex = "0123456789abcdef";
 
@@ -98,6 +163,38 @@ void syscall_handler(struct interrupt_registers *regs, uint64_t number)
         regs->rax = written;
         return;
     }
+    case SYS_BRK:
+        regs->rax = (uint64_t)(int64_t)user_do_brk(regs->rdi);
+        return;
+    case SYS_ARCH_PRCTL:
+        switch (regs->rdi) {
+        case ARCH_SET_FS:
+            /* The thread pointer.  MSR_FS_BASE is a per-thread register, so
+             * it is set here and restored on the way in and out rather than
+             * left pointing wherever the last program put it.  The kernel does
+             * its own work in ring 0 and does not use this register, so the
+             * value is simply parked in a global and applied at the
+             * transitions; writing the MSR from here would also be wrong
+             * because the CPU does not save FS across a task switch that does
+             * not go through the entry paths. */
+            user_fs_base = regs->rsi;
+            regs->rax = 0U;
+            return;
+        case ARCH_GET_FS:
+            regs->rax = user_fs_base;
+            return;
+        default:
+            regs->rax = (uint64_t)-38;  /* ENOSYS: not one we implement */
+            return;
+        }
+    case SYS_MMAP:
+        /* mmap is a long way from done: it needs a file descriptor table, a
+         * page cache and MAP_FIXED handling, and nothing in the startup path
+         * reached yet.  Answering ENOSYS rather than pretending keeps a
+         * library from believing it has memory it does not have, and unlike a
+         * fabricated address it is a failure the program can report. */
+        regs->rax = (uint64_t)-38;
+        return;
     case SYS_EXIT:
         user_exit_code = regs->rdi;
         regs->rax = 0U;
