@@ -21,12 +21,46 @@ isr\number:
 last_error_code:
     .quad 0
 
+/* Where isr_common parks CR2 before it does anything else.  Kept next to the
+ * error code slot because the two are read together and for the same reason:
+ * both are CPU state the exception itself dropped on the stack, and both have
+ * to be picked up before the handler can fault on its own. */
+.global fault_cr2_latest
+fault_cr2_latest:
+    .quad 0
+
 .macro ISR_ERROR number
 .global isr\number
 .type isr\number, @function
 isr\number:
     movq (%rsp), %rax
     movq %rax, last_error_code(%rip)
+    addq $8, %rsp
+    pushq $0
+    pushq $\number
+    jmp isr_common
+.endm
+
+/* Vector 14 takes CR2 as well, and it is read here rather than in isr_common
+ * because of how this assembler is built: a move from CR2 into a register
+ * assembles, and a move from CR2 into memory does not, so "movq %cr2,
+ * fault_cr2_latest(%rip)" is rejected as an operand type mismatch.  %rax is
+ * already scratch here -- it has just carried the error code -- so it can carry
+ * CR2 out as well at no cost.
+ *
+ * It has to be read this early for the same reason the error code is: CR2 holds
+ * the address that faulted and the CPU overwrites it on the next page fault, so
+ * if the handler faults on its own way to reporting the first one, the value is
+ * gone for good.  A page fault whose CR2 comes back as zero is what that looks
+ * like from the outside, which is exactly the case this is here to settle. */
+.macro ISR_PAGE_FAULT number
+.global isr\number
+.type isr\number, @function
+isr\number:
+    movq (%rsp), %rax
+    movq %rax, last_error_code(%rip)
+    movq %cr2, %rax
+    movq %rax, fault_cr2_latest(%rip)
     addq $8, %rsp
     pushq $0
     pushq $\number
@@ -47,7 +81,7 @@ ISR_ERROR 10
 ISR_ERROR 11
 ISR_ERROR 12
 ISR_ERROR 13
-ISR_ERROR 14
+ISR_PAGE_FAULT 14
 ISR_NO_ERROR 15
 ISR_NO_ERROR 16
 ISR_ERROR 17
@@ -101,6 +135,11 @@ isr_syscall:
     jmp syscall_entry
 
 isr_common:
+    /* CR2 is not read here.  It has to be taken before the handler can fault,
+     * which is why the vector 14 entry takes it on the way in, but it cannot be
+     * taken on the way in either: this assembler will not encode a move from
+     * CR2 into memory, so it has to go through a register, and every register
+     * at this point either holds the interrupted context or is about to. */
     pushq %r15
     pushq %r14
     pushq %r13

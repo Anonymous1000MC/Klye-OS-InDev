@@ -717,12 +717,28 @@ __attribute__((noreturn)) void halt_forever(void)
     }
 }
 
+/* fault_cr2_latest lives in interrupts.S, next to last_error_code: the
+ * exception stub writes it and the handler reads it, and the handler has to
+ * take its copy before it touches anything that could fault, because if it does
+ * fault the slot already holds the nested fault's address and the original is
+ * gone for good. */
+extern volatile uint64_t fault_cr2_latest;
+
+/* For printing after the fact.
+ *
+ * Just reads the slot, with no interrupt juggling: the value was taken by the
+ * stub at fault time and does not need re-reading, and enabling interrupts on
+ * the way out would turn them back on in a caller that had them off, which the
+ * panic path very much does. */
+static void serial_hex_byte(uint8_t value)
+{
+    serial_write("0x");
+    serial_hex((uint64_t)value);
+}
+
 static uint64_t read_control_register_2(void)
 {
-    uint64_t value;
-
-    __asm__ volatile("movq %%cr2, %0" : "=r"(value));
-    return value;
+    return fault_cr2_latest;
 }
 
 volatile uint32_t irq1_count;
@@ -755,6 +771,14 @@ struct fault_record {
     uint64_t task_index;
     uint32_t captured;
     uint32_t nested;
+    /* What the nested fault was, rather than just how many there were.
+     *
+     * A fault inside the handler is the explanation for a page fault whose CR2
+     * reads as zero, and if it is not recorded then the count is the only
+     * clue and the reason is gone. */
+    uint64_t nested_cr2;
+    uint64_t nested_rip;
+    uint64_t nested_error;
 };
 
 volatile struct fault_record last_fault;
@@ -764,8 +788,25 @@ static void capture_fault(struct interrupt_registers *registers,
 {
     const uint64_t *slots = (const uint64_t *)(const void *)registers;
 
+    /* CR2 before anything else, and out of the slot the stub wrote rather than
+     * read from the register here: if this handler faults partway through, the
+     * slot is already overwritten with the nested fault's address, so the copy
+     * has to happen while the original is still in it. */
+    uint64_t cr2 = fault_cr2_latest;
+
     if (last_fault.captured != 0U) {
+        /* This is the interesting case, not noise to be swallowed.  A fault
+         * with the page present and a CR2 of zero is what a handler that
+         * faulted on its own way to reporting looks like from the outside, so
+         * record where the second one was: if it is in the kernel it says the
+         * handler walked into something it should not have, and that is the
+         * whole answer. */
         last_fault.nested += 1U;
+        if (last_fault.nested == 1U) {
+            last_fault.nested_cr2 = cr2;
+            last_fault.nested_rip = slots[17];
+            last_fault.nested_error = last_error_code;
+        }
         return;
     }
     last_fault.vector = vector;
@@ -775,7 +816,7 @@ static void capture_fault(struct interrupt_registers *registers,
     last_fault.rflags = slots[19];
     last_fault.rsp = slots[20];
     last_fault.ss = slots[21];
-    last_fault.cr2 = read_control_register_2();
+    last_fault.cr2 = cr2;
     last_fault.rax = registers->rax;
     last_fault.rbx = registers->rbx;
     last_fault.rcx = registers->rcx;
@@ -1400,7 +1441,72 @@ __attribute__((noreturn)) void panic(const char *message)
         if (last_fault.nested != 0U) {
             serial_write("  nested faults  : ");
             serial_hex((uint64_t)last_fault.nested);
+            /* Where the second fault was, and what it was reading or writing.
+             * A nested fault inside the handler is the whole explanation for a
+             * page fault whose own CR2 came back as zero, so it is worth the
+             * three lines: if the address here is in the kernel then the
+             * handler is what went wrong, not the user program. */
+            serial_write("\n  nested address : ");
+            serial_hex(last_fault.nested_cr2);
+            serial_write("\n  nested rip     : ");
+            serial_hex(last_fault.nested_rip);
+            serial_write("\n  nested error   : ");
+            serial_hex(last_fault.nested_error);
             serial_write("\n");
+        }
+        /* What the two addresses the task was actually using map to.
+         *
+         * CR2 is supposed to say, and here it is not to be believed: the walk
+         * is done from the saved registers instead, so the entry for the
+         * instruction and the entry for the stack are both on the record.  A
+         * fault with the page present means a permission problem rather than a
+         * missing mapping, and the flags on these entries are what say which
+         * permission.  It costs four memory reads each and settles the
+         * question that CR2 was supposed to. */
+        {
+            extern uint64_t vm_read_pte(uint64_t virtual_address);
+            extern uint64_t vm_to_physical(uint64_t virtual_address);
+
+            serial_write("  rip pte        : ");
+            serial_hex(vm_read_pte(last_fault.rip));
+            serial_write("\n  rsp pte        : ");
+            serial_hex(vm_read_pte(last_fault.rsp));
+            serial_write("\n  rsp page       : ");
+            serial_hex(last_fault.rsp & ~0xFFFU);
+            serial_write("\n");
+            /* The instruction the CPU stopped on.
+             *
+             * RIP says where the fault was reported, not what the program was
+             * doing: an entry point that faults on its first instruction and
+             * one that runs for a while and faults later both print an address,
+             * and they need completely different fixes.  Sixteen bytes covers
+             * every x86 instruction that can fault on a memory operand, and
+             * the entry point of a program built from source is short enough
+             * that the whole thing is usually in view.
+             *
+             * Read through the page tables rather than straight out of the
+             * address, because if the page is not mapped then reading it
+             * directly is a second fault inside the fault handler. */
+            {
+                uint64_t where = last_fault.rip;
+                uint64_t physical = vm_to_physical(where);
+
+                serial_write("  rip physical   : ");
+                serial_hex(physical);
+                serial_write("\n  code bytes     : ");
+                if (physical == 0U) {
+                    serial_write("(page not mapped)");
+                } else {
+                    const uint8_t *code =
+                        (const uint8_t *)(uintptr_t)physical;
+
+                    for (uint32_t byte = 0; byte < 16U; ++byte) {
+                        serial_hex_byte(code[byte]);
+                        serial_write(" ");
+                    }
+                }
+                serial_write("\n");
+            }
         }
     } else {
         serial_write("  detected cause : software invariant failed, "

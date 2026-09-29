@@ -19,6 +19,16 @@ __attribute__((noreturn)) void task_exit(void);
  * task index, or -1. */
 int task_spawn_user(uint64_t entry, uint64_t user_stack);
 
+/* End the running task without coming back.
+ *
+ * For a syscall that retires the program rather than answering a question --
+ * exit, and eventually exit_group.  The syscall stub returns to user mode with
+ * sysretq, so a handler that returns after the program has finished sends
+ * execution to whatever instruction follows its last one, which for a program
+ * that ends in exit is one past the end of its text.  Marked noreturn so the
+ * compiler stops a handler from carrying on afterwards. */
+__attribute__((noreturn)) void task_kill_current(void);
+
 int scheduler_current_task(void);
 
 #endif

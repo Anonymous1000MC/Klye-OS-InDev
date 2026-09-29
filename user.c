@@ -104,6 +104,19 @@ void syscall_handler(struct interrupt_registers *regs, uint64_t number)
         serial_write("  user: exited with ");
         put_hex(regs->rdi);
         serial_putc('\n');
+        /* The program is finished, so it must not be returned to.
+         *
+         * Returning here looks harmless and is not: the syscall stub ends in
+         * sysretq, which goes back to the instruction after the syscall.  For
+         * a program whose last instruction is the exit, that address is one
+         * past the end of its text, and the processor faults on whatever
+         * instruction bytes happen to be there -- a general protection fault
+         * at an address that is not in the program at all, which reads as a
+         * paging or a privilege problem and is neither.
+         *
+         * Linux does not return from exit either: the thread is gone.  So the
+         * task is killed here and control does not come back. */
+        task_kill_current();
         return;
     default:
         serial_write("  user: unknown syscall ");

@@ -231,6 +231,47 @@ void task_trampoline(uint64_t task_index)
     task_exit();
 }
 
+/* End the running task from inside a syscall.
+ *
+ * Same effect as task_exit and for the same reason, but reachable from a
+ * syscall handler: the stub is going to sysretq back to user mode when the
+ * handler returns, and a program that has just called exit has no instruction
+ * to come back to.  task_exit is for the trampoline, which is called rather
+ * than returned through, and its "the function returned" comment does not
+ * describe this case, so this is spelled out separately.
+ *
+ * The task's pages are deliberately not released.  The mappings belong to the
+ * program and something else may still be holding a pointer into them -- the
+ * shell that reported the exit code, for one -- and a use after free here would
+ * be a fault with no way to tell it from any other. */
+__attribute__((noreturn)) void task_kill_current(void)
+{
+    int next;
+
+    __asm__ volatile("cli");
+    if (current_task_index < 0) {
+        panic("task killed with no scheduler running");
+    }
+
+    tasks[current_task_index].ready = false;
+    next = next_ready_task(current_task_index);
+    if (next < 0) {
+        /* Nothing else to run.  Stopping here is better than switching to a
+         * task that does not exist: the program is gone, the machine is idle,
+         * and a panic says so on the serial line instead of hanging. */
+        serial_write("  task: last task exited, halting\n");
+        for (;;) {
+            __asm__ volatile("cli; hlt");
+        }
+    }
+
+    current_task_index = next;
+    task_context_restore(&tasks[next].registers, &tasks[next].frame);
+    for (;;) {
+        __asm__ volatile("cli; hlt");
+    }
+}
+
 __attribute__((noreturn)) void task_exit(void)
 {
     int next;

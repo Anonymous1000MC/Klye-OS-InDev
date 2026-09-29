@@ -194,32 +194,54 @@ static bool elf_load_segment(const char *path, const struct elf64_program_header
                       memsz + (virtual_address & (VM_PAGE_BYTES - 1U)))) {
         return false;
     }
+    /* The copy goes through the physical address, not the virtual one.
+     *
+     * The kernel runs with paging on and the user window is not identity
+     * mapped, so a store to a program's virtual address from ring 0 does not
+     * land in the program's page: it either faults or hits whatever the
+     * kernel's own mapping of that number happens to be.  The segments came up
+     * present and user accessible and still contained nothing, because the
+     * bytes were never written to the frames the page table points at.
+     *
+     * A page at a time, and each page translated on its own, because a
+     * segment can start part way into a page and a translation is only valid
+     * for the page it came from. */
     while (done < filesz) {
         char buffer[4096];
         uint32_t want = (uint32_t)(sizeof(buffer) < (filesz - done)
                                        ? sizeof(buffer) : (filesz - done));
         int got = vfs_read_at(path, buffer, (uint32_t)(offset + done), want);
+        uint32_t index = 0;
 
         if (got <= 0) {
             elf_fail("the file ended in the middle of a segment");
             return false;
         }
-        {
-            char *where = (char *)(uintptr_t)(virtual_address + done);
-            uint32_t index = 0;
+        while (index < (uint32_t)got) {
+            uint64_t at = virtual_address + done + index;
+            uint64_t physical = vm_to_physical(at);
 
-            while (index < (uint32_t)got) {
-                where[index] = buffer[index];
-                index++;
+            if (physical == 0U) {
+                elf_fail("a segment page is not mapped after mapping it");
+                return false;
             }
-            done += (uint32_t)got;
+            *((volatile uint8_t *)(uintptr_t)physical) =
+                (uint8_t)buffer[index];
+            index++;
         }
+        done += (uint32_t)got;
     }
     /* the rest of the segment exists in memory but not in the file, and a
-     * program is entitled to read it as zero */
+     * program is entitled to read it as zero.  heap_alloc_frame hands back
+     * zeroed pages, so this only has to cover a segment that overlaps a page
+     * an earlier segment already filled. */
     end = virtual_address + memsz;
     for (uint64_t at = virtual_address + filesz; at < end; at++) {
-        *(volatile uint8_t *)(uintptr_t)at = 0U;
+        uint64_t physical = vm_to_physical(at);
+
+        if (physical != 0U) {
+            *((volatile uint8_t *)(uintptr_t)physical) = 0U;
+        }
     }
     return true;
 }
@@ -246,6 +268,7 @@ bool elf_run(const char *path)
     struct elf64_header header;
     uint64_t bias = 0;
     uint64_t stack;
+    uint64_t image_end = 0U;
     int got;
     uint16_t index;
 
@@ -304,6 +327,43 @@ bool elf_run(const char *path)
         elf_fail("the entry point is outside the address range a program may use");
         return false;
     }
+    /* The highest address any segment reaches, so the stack can go above it.
+     *
+     * Read out of the program headers before anything is mapped, because the
+     * stack is a bump allocation from the same window the segments were mapped
+     * into and the two must not overlap. */
+    for (index = 0; index < header.phnum; ++index) {
+        struct elf64_program_header ph;
+        uint32_t at = (uint32_t)(header.phoff +
+                                 (uint64_t)index * (uint64_t)header.phentsize);
+        int read = vfs_read_at(path, (char *)&ph, at, (uint32_t)sizeof(ph));
+
+        if (read < (int)sizeof(ph)) {
+            elf_fail("the program header table is truncated");
+            return false;
+        }
+        if (ph.type != PT_LOAD || ph.memsz == 0U) {
+            continue;
+        }
+        if ((ph.flags & (PF_R | PF_W | PF_X)) == 0U) {
+            continue;
+        }
+        if (ph.vaddr + ph.memsz > image_end) {
+            image_end = ph.vaddr + ph.memsz;
+        }
+    }
+    /* Above the last segment, rounded up to a page, plus a gap.
+     *
+     * vm_user_map_at, which is what maps the segments, deliberately does not
+     * move the window's bump pointer, so a plain vm_user_alloc_pages for the
+     * stack hands back the bottom of the window -- the same pages the entry
+     * point was just loaded into.  Allocating the stack then zeroes every page
+     * it covers, and the program's own text was wiped moments after being
+     * written: the page stayed present and user readable and contained nothing,
+     * so the entry faulted on an instruction fetch of zeroes and the cause was
+     * nowhere near the stack that caused it. */
+    image_end = (image_end + VM_PAGE_BYTES - 1U) & ~(uint64_t)(VM_PAGE_BYTES - 1U);
+    image_end += VM_PAGE_BYTES;
     for (index = 0; index < header.phnum; ++index) {
         struct elf64_program_header ph;
         uint32_t at = (uint32_t)(header.phoff +
@@ -335,18 +395,29 @@ bool elf_run(const char *path)
     }
     elf_apply_internal_relocations();
 
-    /* A stack for it.  8 KiB is what a program that only makes syscalls needs
-     * and is deliberately not configurable yet: a real C library will want
-     * more, and a stack that is too small is a fault in the middle of the
-     * program's own code rather than a message here. */
+    /* A stack for it.  64 KiB is what a program that only makes syscalls needs
+     * and is deliberately not configurable yet: a real C library will want more,
+     * and a stack that is too small is a fault in the middle of the program's
+     * own code rather than a message here. */
     {
-        void *pages = vm_user_alloc_pages(ELF_STACK_BYTES);
+        uint64_t low = image_end + bias;
+        uint64_t high = low + ELF_STACK_BYTES;
 
-        if (pages == 0) {
-            elf_fail("no memory for the program stack");
+        /* Mapped at an address chosen here rather than bump allocated, because
+         * the window's own pointer is still at the bottom and the segments own
+         * that.  Rounded down to a page: the segments were rounded up when the
+         * end was computed, so this is already aligned, and asking for an
+         * unaligned range is refused rather than quietly rounded. */
+        if (vm_user_map_at(low & ~(uint64_t)(VM_PAGE_BYTES - 1U),
+                           (size_t)ELF_STACK_BYTES) == 0) {
+            elf_fail(vm_error());
             return false;
         }
-        stack = ((uint64_t)(uintptr_t)pages + ELF_STACK_BYTES) & ~0xFULL;
+        /* The stack pointer is the top of the region and grows down, so it is
+         * the first address *past* the last usable byte, not a usable address
+         * itself.  Sixteen byte aligned because that is what the ABI wants at
+         * the point a program is entered. */
+        stack = high & ~0xFULL;
     }
 
     elf_report("entry", header.entry + bias);

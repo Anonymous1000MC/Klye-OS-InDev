@@ -90,3 +90,86 @@ tests/hello.c, freestanding: write(1,...) twice then exit(0), via raw syscall
 inline asm.  Deliberately not linked against libc, because there is no signal
 handling, futex, brk or arch_prctl yet, so a libc program would stop inside
 libc's own startup and say nothing about why.
+
+## Solved: the ELF entry fault
+
+`elf /bin/hello.elf` runs. It writes "hello from a loaded ELF program" and
+exits 0, with no panic. Three separate faults were stacked on top of each other,
+and the first two were disguised as the third.
+
+### 1. Segments were never written to the frames
+
+`elf_load_segment` copied the file through the *virtual* address
+(`where = virtual_address + done`). The kernel runs with paging on and the user
+window is not identity mapped, so those stores did not land in the program's
+pages. The page came up present and user readable and full of zeros, so the
+entry point faulted on an instruction fetch of zeroes.
+
+The copy now goes through `vm_to_physical`, a page at a time, because a
+translation is only valid for the page it came from and a segment can start part
+way into one.
+
+### 2. The stack was mapped over the program's own text
+
+`vm_user_map_at`, which maps the segments, deliberately does not move the
+window's bump pointer. So `vm_user_alloc_pages` for the stack returned the
+*bottom* of the window -- the same pages the entry point had just been loaded
+into -- and zeroed every page it covered. The text was wiped moments after
+being written, which is why the fix for (1) appeared not to work.
+
+The stack is now mapped at an address above the highest segment, computed from
+the program headers before anything is mapped.
+
+### 3. exit returned instead of terminating the program
+
+`SYS_EXIT` recorded the code and returned. The syscall stub returns to user
+mode with `sysretq`, which goes to the instruction *after* the syscall, so a
+program whose last instruction is `exit` ran off the end of its text. It showed
+up as a `#GP` at an address one past `.text`, which reads as a privilege or
+paging fault and is neither.
+
+`task_kill_current()` in scheduler.c, marked noreturn, called from the handler.
+
+## Ruled out, with reasons
+
+- **PAE vs four-level paging.** Not a bug. PAE is mandatory in long mode; the
+  four-level hierarchy is built on top of PAE mechanics. Clearing CR4.PAE is
+  why an earlier experiment produced a silent boot failure, and it was never a
+  valid thing to try.
+- **Missing static-PIE relocations.** Real gap, but not this fault.
+  `readelf -d rootfs/bin/hello.elf` has no `DT_RELA` and `readelf -r` reports no
+  relocations, because it is `-nostdlib` with no absolute pointers in data.
+  A musl static binary will need the `R_X86_64_RELATIVE` loop before it runs.
+- **CR2 = 0 from a nested fault.** No nested fault occurred; the count stayed
+  at zero. The real reason CR2 read as zero is below.
+
+## Why CR2 read as zero
+
+CR2 was being read late: `capture_fault` read it after `last_error_code`, some
+twenty struct writes and fourteen register copies, so a fault inside the handler
+would have destroyed it. It never happened here, but the window was real.
+
+`isr_common` could not close it either -- this assembler rejects
+`movq %cr2, sym(%rip)` as an operand type mismatch, while the same move into a
+register assembles. So vector 14 has its own entry macro that reads CR2 into
+`%rax`, where the error code has already claimed it as scratch, and parks it in
+`fault_cr2_latest` before the handler runs.
+
+It read as zero because the fault was a `#GP`, which does not set CR2 at all.
+Once the three faults above were fixed the `#PF` was gone and the `#GP` was
+what remained, and CR2 was zero simply because nothing had put anything there.
+
+## Diagnostics added, and why each one earned its place
+
+- `nested_cr2` / `nested_rip` / `nested_error`: a handler that faults on its own
+  is indistinguishable from a program that faults, from outside.
+- `rip pte`, `rsp pte`: separates "page absent" from "page present but refused",
+  which are the same fault from the program's side. This is what showed the
+  stack was unmapped.
+- `rip physical` + 16 code bytes: RIP alone says where the fault was reported,
+  not what the program was doing. The bytes settled it -- a page of zeros at the
+  entry meant the loader had not written, and a `#GP` at entry+0x30 said the
+  program had been running and fell off the end.
+
+The harness `gdb()` wrapper still prepends `print` to every command, so
+breakpoints and memory reads through it remain unreliable.
