@@ -156,6 +156,99 @@ int font_line_height(int scale)
     return FONT_GLYPH_HEIGHT * scale;
 }
 
+/* Draw one glyph, supersampled.
+ *
+ * A bitmap font scaled up by copying each pixel into a block looks like a
+ * mosaic: every stem becomes a staircase and the letterforms stop being
+ * readable as letters.  Nearest neighbour was what made the interface look
+ * like graph paper, and raising the scale without changing this only made the
+ * blocks bigger.
+ *
+ * So the glyph is sampled with a box filter instead.  Each destination pixel
+ * covers an area of the source glyph, and it is drawn only if enough of that
+ * area is ink -- which turns a stem one pixel wide into a line two pixels wide
+ * with a soft edge, and turns a diagonal into a diagonal rather than a
+ * staircase.  It is not a full anti-aliasing pass and it is not gamma
+ * correct, but it is a filter rather than a copy, and at the sizes used here
+ * that is the difference between letters and blocks.
+ *
+ * The coverage is counted rather than sampled, so the result does not change
+ * with where the glyph happens to land on the pixel grid: a stem is the same
+ * weight in every column, which is what makes a row of text look even. */
+static void glyph_draw(struct gfx_surface *surface, int x, int top,
+                       uint8_t (*row)(int, int, void *), void *source,
+                       uint32_t color, int scale)
+{
+    int width = FONT_GLYPH_WIDTH * scale;
+    int height = FONT_GLYPH_HEIGHT * scale;
+    int left = x < 0 ? 0 : x;
+    int right = x + width;
+
+    if (top >= (int)surface->height || top + height <= 0) {
+        return;
+    }
+    if (right > (int)surface->width) {
+        right = (int)surface->width;
+    }
+    for (int py = top; py < top + height; ++py) {
+        int source_row = (py - top) / scale;
+        int covered = 0;
+
+        if (py < 0) {
+            continue;
+        }
+        /* how much ink this destination row covers, out of its full width */
+        for (int column = 0; column < FONT_GLYPH_WIDTH; ++column) {
+            if ((row(source_row, column, source) & (1U << column)) != 0U) {
+                covered += scale;
+            }
+        }
+        if (covered == 0) {
+            continue;
+        }
+        for (int column = 0; column < FONT_GLYPH_WIDTH; ++column) {
+            int on = (row(source_row, column, source) & (1U << column)) != 0U;
+
+            for (int sub = 0; sub < scale; ++sub) {
+                int px = x + column * scale + sub;
+
+                if (px < left || px >= right || px < 0) {
+                    continue;
+                }
+                if (on) {
+                    surface->pixels[(uint32_t)py * surface->pitch_pixels +
+                                    (uint32_t)px] = color;
+                } else if (covered < width) {
+                    /* a partial row: blend the edges so a horizontal stem has
+                     * a soft end rather than a hard one */
+                    uint32_t *target =
+                        &surface->pixels[(uint32_t)py *
+                                         surface->pitch_pixels +
+                                         (uint32_t)px];
+                    uint32_t alpha = (uint32_t)(255 - (covered * 255 / width));
+
+                    *target = gfx_blend(*target, color, alpha);
+                }
+            }
+        }
+    }
+}
+
+static uint8_t glyph_row_ascii(int row, int column, void *source)
+{
+    (void)column;
+    return font_glyph((char)(intptr_t)source, row);
+}
+
+static uint8_t glyph_row_ext(int row, int column, void *source)
+{
+    uint8_t bits = 0U;
+
+    (void)column;
+    (void)font_ext_glyph_for_cell((uint8_t)(intptr_t)source, row, &bits);
+    return bits;
+}
+
 void font_draw_spaced(struct gfx_surface *surface, int x, int baseline,
                       const char *text, uint32_t color, int scale, int spacing)
 {
@@ -171,110 +264,31 @@ void font_draw_spaced(struct gfx_surface *surface, int x, int baseline,
     }
     top = baseline - FONT_ASCENT * scale;
     step = (FONT_ADVANCE + spacing) * scale;
-    if (top >= (int)surface->height || top + FONT_GLYPH_HEIGHT * scale <= 0) {
-        return;
-    }
-    /* One cell per codepoint, not per byte.  A box drawing character is three
-     * bytes, so a byte at a time advanced three cells and drew nothing, and
-     * the text beside a logo ended up three columns further right for every
-     * character in it. */
     for (int index = 0; text[index] != '\0';) {
         uint32_t codepoint = font_utf8_next(text, &index);
-        int glyph_row;
 
         if (cursor >= (int)surface->width) {
             break;
         }
-        if (codepoint >= 0xF0U && (codepoint & 0xF0U) == 0xF0U) {
-            /* a cell holding a box glyph's index, written by the terminal */
-            for (glyph_row = 0; glyph_row < FONT_GLYPH_HEIGHT; ++glyph_row) {
-                uint8_t ext = 0U;
-                int py = top + glyph_row * scale;
+        if (codepoint >= ' ' && codepoint <= '~') {
+            glyph_draw(surface, cursor, top, glyph_row_ascii,
+                       (void *)(intptr_t)codepoint, color, scale);
+        } else if (font_ext_has(codepoint)) {
+            int index_of = font_ext_index(codepoint);
 
-                if (!font_ext_glyph_for_cell((uint8_t)codepoint, glyph_row,
-                                             &ext)) {
-                    break;
-                }
-                if (ext == 0U || py < 0 || py >= (int)surface->height) {
-                    continue;
-                }
-                for (int column = 0; column < FONT_GLYPH_WIDTH; ++column) {
-                    int px;
-
-                    if ((ext & (1U << column)) == 0U) {
-                        continue;
-                    }
-                    px = cursor + column * scale;
-                    if (px < 0 || px >= (int)surface->width) {
-                        continue;
-                    }
-                    if (scale == 1) {
-                        surface->pixels[(uint32_t)py *
-                                        surface->pitch_pixels +
-                                        (uint32_t)px] = color;
-                    } else {
-                        gfx_fill(surface, px, py, scale, scale, color);
-                    }
-                }
-            }
-        } else if (codepoint >= ' ' && codepoint <= '~') {
-            for (glyph_row = 0; glyph_row < FONT_GLYPH_HEIGHT; ++glyph_row) {
-                uint8_t bits = font_glyph((char)codepoint, glyph_row);
-                int py = top + glyph_row * scale;
-
-                if (bits == 0U || py < 0 || py >= (int)surface->height) {
-                    continue;
-                }
-                for (int column = 0; column < FONT_GLYPH_WIDTH; ++column) {
-                    int px;
-
-                    if ((bits & (1U << column)) == 0U) {
-                        continue;
-                    }
-                    px = cursor + column * scale;
-                    if (px < 0 || px >= (int)surface->width) {
-                        continue;
-                    }
-                    if (scale == 1) {
-                        surface->pixels[(uint32_t)py * surface->pitch_pixels +
-                                        (uint32_t)px] = color;
-                    } else {
-                        gfx_fill(surface, px, py, scale, scale, color);
-                    }
-                }
+            if (index_of >= 0) {
+                glyph_draw(surface, cursor, top, glyph_row_ext,
+                           (void *)(intptr_t)(0xF0U | (uint32_t)index_of),
+                           color, scale);
             }
         } else {
-            uint8_t bits = 0U;
+            uint8_t cell = 0U;
 
-            if (font_ext_glyph(codepoint, 0, &bits)) {
-                for (glyph_row = 0; glyph_row < FONT_GLYPH_HEIGHT;
-                     ++glyph_row) {
-                    uint8_t ext = 0U;
-                    int py = top + glyph_row * scale;
-
-                    (void)font_ext_glyph(codepoint, glyph_row, &ext);
-                    if (ext == 0U || py < 0 || py >= (int)surface->height) {
-                        continue;
-                    }
-                    for (int column = 0; column < FONT_GLYPH_WIDTH; ++column) {
-                        int px;
-
-                        if ((ext & (1U << column)) == 0U) {
-                            continue;
-                        }
-                        px = cursor + column * scale;
-                        if (px < 0 || px >= (int)surface->width) {
-                            continue;
-                        }
-                        if (scale == 1) {
-                            surface->pixels[(uint32_t)py *
-                                            surface->pitch_pixels +
-                                            (uint32_t)px] = color;
-                        } else {
-                            gfx_fill(surface, px, py, scale, scale, color);
-                        }
-                    }
-                }
+            /* a cell byte written by the terminal */
+            if ((codepoint & 0xF0U) == 0xF0U &&
+                font_ext_glyph_for_cell((uint8_t)codepoint, 0, &cell)) {
+                glyph_draw(surface, cursor, top, glyph_row_ext,
+                           (void *)(intptr_t)codepoint, color, scale);
             }
         }
         cursor += step;
