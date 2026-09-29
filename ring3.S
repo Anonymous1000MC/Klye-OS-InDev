@@ -277,14 +277,6 @@ syscall_return:
      * stack.  Loading that stack pointer and then calling anything pushes the
      * return address onto it, and a push there is a write into the page above
      * the allocation: mapped, so no fault, and quietly wrong. */
-    /* The program's thread pointer again, on the way back to it.  Done before
-     * %rcx is loaded because wrmsr needs %ecx for the MSR number and rcx is
-     * where sysretq takes its instruction pointer from: doing it afterwards
-     * would overwrite the address being returned to. */
-    movl $0xC0000100, %ecx      /* IA32_FS_BASE */
-    movq user_fs_base_slot(%rip), %rax
-    wrmsr
-
     /* %rsp is loaded straight from memory, with no register in between.
      *
      * This used to go through %rbx, as scratch, and that is an ABI violation

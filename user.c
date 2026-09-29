@@ -221,7 +221,6 @@ MARK(serial_marker_ptr_return, "r3: returning to ring 3");
  * never returns -- and exit never does -- is still on the record. */
 #define SYS_EXIT_GROUP 231
 
-static void put_hex(uint64_t value);
 static void syscall_dispatch(struct interrupt_registers *regs,
                               uint64_t number);
 
