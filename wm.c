@@ -2512,10 +2512,14 @@ bool wm_set_wallpaper(const char *path)
             wallpaper_error_text = "not enough memory to read the file";
             return false;
         }
-        if (vfs_read(path, (char *)data, (uint32_t)length) != length) {
-            heap_free(data);
-            wallpaper_error_text = "the file could not be read";
-            return false;
+        {
+            int got = vfs_read(path, (char *)data, (uint32_t)length);
+
+            if (got != length) {
+                heap_free(data);
+                wallpaper_error_text = "the file could not be read";
+                return false;
+            }
         }
     }
     ok = png_decode(data, (size_t)length, wm.wallpaper);
