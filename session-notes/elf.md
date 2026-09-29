@@ -288,3 +288,56 @@ This is the bug behind "why is my wallpaper too big", and it was never one bug:
 
 The recurring lesson, now four times: a limit that quietly truncates looks
 exactly like a limit that works, and every test asset happened to be under it.
+
+## The AVX wall, and what it is not
+
+A glibc `-static-pie` binary now runs its own startup: it walks envp, runs
+_dl_relocate_static_pie's 1125 self-relocations, and runs __libc_setup_tls. It
+then faults in _dl_aux_init on
+
+    262e5:  c5 f9 ef c0    vpxor %xmm0,%xmm0,%xmm0
+
+a VEX-encoded instruction. Three separate bugs in my own attempt to enable AVX
+state, each found by reading the disassembly of what I had actually built:
+
+1. **`xsetbv` was being assembled as `xgetbv`.** They share the opcode
+   `0F 01 D0` and differ only in a REX.W prefix: `48 0F 01 D0` writes, `0F 01
+   D0` reads. Emitted bare, it read XCR0 and discarded the result, enabling
+   nothing at all -- and looking like a correct enable in the source.
+2. **The feature bit was tested in the wrong register.** CPUID puts the
+   feature flags in ECX and EDX; EAX holds the highest leaf. Testing EAX
+   tested the number 1 against bit 26, which is always false, so the guard
+   skipped the AVX enable every single time.
+3. **`cpuid` clobbers RBX** and it was not saved, in a function where RBX is
+   callee-saved.
+
+With all three fixed the enable genuinely runs: CR4 goes from 0x2A0 to 0x402A0,
+OSXSAVE is set, and reading XCR0 back gives **1**.
+
+XCR0 = 1 is x87 alone. So the CPU accepted the instruction and kept only bit 0.
+QEMU's TCG does not honour the request on this host, whatever CPU model is
+selected: qemu64 reports XSAVE clear (so xsetbv is itself an invalid opcode
+and the machine dies before the first serial byte, with no message), and
+`-cpu max` reports XSAVE and AVX present and still leaves XCR0 at 1.
+
+The three fixes are correct and stay -- they would work on hardware that
+honours the request. The wall is the emulator, not the kernel.
+
+### This is not a test-method problem, as first assumed
+
+The first guess was that the binary was at fault: that a plain `gcc
+-static-pie` inherits the host's AVX baseline, and that rebuilding with
+`-march=x86-64 -mno-avx` would remove the VEX instructions. It does not.
+The prebuilt glibc objects in libc.a carry them, not the code being compiled:
+
+    $ objdump -d glibc.elf | grep -coE '\bv[a-z0-9]+ '
+    7657
+
+A stock static glibc binary contains thousands of VEX instructions and will
+need the AVX state enabled to run at all. So there is no way to avoid this
+short of building glibc from source for a baseline target.
+
+The decision is therefore to stop on glibc and go to musl, which is small
+enough to reason about and whose startup does not lean on the vector
+initialisation paths. musl 1.2.6 is in the package repository; it needs to be
+installed with sudo, which is not available here.

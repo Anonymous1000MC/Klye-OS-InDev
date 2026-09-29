@@ -128,6 +128,14 @@ class Guest:
             # kernel.  The old flat image had no signature, so the disk was
             # skipped and this never showed up.
             ] + (['-boot', 'order=d'] if use_cdrom else []) + [
+            # A CPU model with the extended state saved and restored.
+            #
+            # qemu64 is the default and reports CPUID.1:ECX bit 26 -- XSAVE --
+            # as clear, so xsetbv is itself an invalid opcode and there is no
+            # way to enable the AVX register state on it at all.  "max" has
+            # XSAVE, OSXSAVE and AVX, which is what a kernel needs to offer
+            # before a VEX-encoded instruction can be decoded.  See fpu.S.
+            '-cpu', 'max',
             '-m', mem,
             '-serial', 'file:%s' % self.log_path,
             '-display', 'none',
