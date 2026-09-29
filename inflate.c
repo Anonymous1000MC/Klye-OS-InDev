@@ -148,6 +148,33 @@ struct backref {
     uint32_t distance;
 };
 
+/* Put one output byte into the back reference window.
+ *
+ * The window is a ring: the byte goes in at the position it occupies in the
+ * output, modulo the window size, and the fill counter keeps counting past the
+ * end of the ring rather than stopping at it.
+ *
+ * Every path that emits a byte has to come through here, and that is the whole
+ * point of the function.  Appending used to be guarded by "only if there is
+ * room", and the literal paths had no alternative branch at all, so once the
+ * window filled, every later literal was handed to the caller and then thrown
+ * away.  The stream still produced exactly the right number of bytes, which is
+ * why nothing reported an error, but the window no longer held the recent
+ * output, so the next back reference read from a stale position.  Anything
+ * under 32 KiB came out right and anything larger was quietly wrong past the
+ * point the window filled -- and since the emitted count is what the caller
+ * checks, the damage was invisible from the outside.
+ *
+ * Writing through a modulus also drops the old slide, which copied the whole
+ * 32 KiB down by one byte for every byte emitted: 32 KiB of work per byte of
+ * output, so a wallpaper was minutes of memcpy rather than a decode. */
+static void history_push(uint8_t *history, size_t history_length,
+                         size_t *history_used, uint8_t byte)
+{
+    history[*history_used % history_length] = byte;
+    (*history_used)++;
+}
+
 /* Run one length/distance pair, calling emit once per byte.
  *
  * One byte at a time rather than in runs because the callback may need each
@@ -161,41 +188,32 @@ static bool inflate_backref(struct inflate_state *state,
                             size_t *history_used, uint32_t before,
                             inflate_emit_fn emit, void *context)
 {
-    ptrdiff_t from = (ptrdiff_t)*history_used - (ptrdiff_t)ref.distance;
+    size_t start = *history_used;
+    size_t from;
 
-    if (ref.distance == 0U || ref.distance > *history_used) {
+    /* A distance is measured back from where the output has got to, and every
+     * byte it can name is still in the ring: the ring keeps the most recent
+     * 32 KiB and DEFLATE cannot express a longer distance. */
+    if (ref.distance == 0U || (size_t)ref.distance > start ||
+        (size_t)ref.distance > history_length) {
         return false;
     }
-    /* A match is copied a byte at a time and each byte is appended to the
-     * window as it goes, so a match that starts near the end of the window and
-     * runs past it is fine: the bytes it is copying are the ones just written.
-     * Refusing because the window would overflow is what made every image
-     * larger than 32 KiB fail, which is every wallpaper. */
+    from = start - (size_t)ref.distance;
+    /* One byte at a time rather than in runs because the callback may need each
+     * byte in order -- a PNG defilter needs the previous byte of the row, and
+     * emitting a whole match at once would hand it bytes it has not filtered
+     * yet.  A match that overlaps itself, which is how a run is encoded, reads
+     * back the bytes it has just written, because the source index walks
+     * forward into the ring at the same time as the ring fills.
+     * The callback is inlined by the compiler at -O2, so the per byte cost is
+     * a call and a compare. */
     for (uint32_t index = 0; index < ref.length; ++index) {
-        uint8_t byte;
+        uint8_t byte = history[(from + (size_t)index) % history_length];
 
-        if (from + (ptrdiff_t)index < 0 ||
-            (size_t)(from + (ptrdiff_t)index) >= history_length) {
-            return false;
-        }
-        byte = history[from + (ptrdiff_t)index];
         if (!emit(context, byte)) {
             return false;
         }
-        if (*history_used < history_length) {
-            history[(*history_used)++] = byte;
-        } else {
-            /* slide: drop the oldest byte so the window stays the most recent
-             * history a later match can refer back to */
-            for (size_t move = 0; move + 1U < history_length; ++move) {
-                history[move] = history[move + 1U];
-            }
-            history[history_length - 1U] = byte;
-            if (from == 0) {
-                return false; /* nothing older left to refer to */
-            }
-            from--;
-        }
+        history_push(history, history_length, history_used, byte);
     }
     (void)state;
     (void)before;
@@ -221,9 +239,7 @@ static bool inflate_block(struct inflate_state *state,
             if (!emit(context, byte)) {
                 return false;
             }
-            if (*history_used < history_length) {
-                history[(*history_used)++] = byte;
-            }
+            history_push(history, history_length, history_used, byte);
             continue;
         }
         if (symbol == 256) {
@@ -376,9 +392,7 @@ static bool inflate_stored(struct inflate_state *state, uint8_t *history,
         if (!emit(context, byte)) {
             return false;
         }
-        if (*history_used < history_length) {
-            history[(*history_used)++] = byte;
-        }
+        history_push(history, history_length, history_used, byte);
     }
     return true;
 }
@@ -391,10 +405,10 @@ const char *inflate_error(void)
 /* The caller's emit, with a byte counter on top.
  *
  * How much has come out is a question about the bytes the caller was actually
- * given, not about how full the back reference window is: the window is 32 KiB
- * and saturates, so using its fill as a progress measure stops the stream after
- * 32 KiB however much more there was.  That is not a corner case -- it is every
- * image larger than 32 KiB, which is every wallpaper. */
+ * given, not about how far round the back reference ring has been: the ring is
+ * 32 KiB and wraps, so using the window as a progress measure stops the stream
+ * after 32 KiB however much more there was.  That is not a corner case -- it is
+ * every image larger than 32 KiB, which is every wallpaper. */
 struct emit_counter {
     inflate_emit_fn emit;
     void *context;
@@ -423,6 +437,10 @@ bool inflate_stream(const uint8_t *input, size_t input_length,
     int final = 0;
 
     inflate_error_text = "";
+    if (history_length == 0U) {
+        inflate_error_text = "the back reference window is empty";
+        return false;
+    }
     counter.emit = emit;
     counter.context = context;
     counter.count = 0U;

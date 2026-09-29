@@ -109,6 +109,20 @@ else
     echo "skipping doom3d_test: no WAD at $WAD"
 fi
 
+# PNG decoding, against a decode of the wallpaper made with zlib.  The window
+# bug this covers only shows up on an image larger than the 32 KiB DEFLATE
+# back reference window, so the small fixtures that came before it were all
+# green while every real wallpaper came out black below the fold.
+$cc $cflags -c "$here/png_test.c" -o "$out/png_test.o"
+$cc $cflags -c "$here/../png.c" -o "$out/png.o"
+$cc $cflags -c "$here/../inflate.c" -o "$out/inflate.o"
+$cc "$out/png_test.o" "$out/png.o" "$out/inflate.o" "$out/stubs.o" \
+    -o "$out/png_test"
+if ! "$out/png_test" "$here/../rootfs/home/klye/picture.png"; then
+    echo "png_test FAILED"
+    status=1
+fi
+
 # differential test against glibc; see the comment in fmt_diff.c for the two
 # known classes of disagreement and why the baseline is not zero
 $cc $cflags -c "$here/fmt_diff.c" -o "$out/fmt_diff.o"
