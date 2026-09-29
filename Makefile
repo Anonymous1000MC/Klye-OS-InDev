@@ -35,7 +35,7 @@ ROOTFS := rootfs
 TOOLS := $(BUILD_DIR)/tools
 VFS_IMAGE := $(BUILD_DIR)/vfs_image.c
 
-C_SOURCES := kernel.c scheduler.c mem.c heap.c libc.c gfx.c font.c input.c vfs.c launcher.c kby.c kas.c apps.c shell.c wm.c gui.c lua_host.c ata.c blob.c mmu.c wad.c doom.c doom_level.c doom3d.c fat.c pci.c virtio.c user.c
+C_SOURCES := kernel.c scheduler.c mem.c heap.c libc.c gfx.c font.c input.c vfs.c launcher.c kby.c kas.c apps.c shell.c wm.c gui.c lua_host.c ata.c blob.c mmu.c wad.c doom.c doom_level.c doom3d.c fat.c pci.c virtio.c user.c elf.c
 ASM_SOURCES := interrupts.S context.S fpu.S setjmp.S ring3.S usertest.S
 
 # Lua 5.4.7 core plus the base/string/table/math/utf8 libraries.  The io, os,
@@ -119,9 +119,19 @@ LUA_STAGE_FILES := $(patsubst $(ROOTFS)/home/klye/lua/%,$(ROOTFS)/bin/%,$(LUA_ST
 $(LUA_STAGE_FILES): $(ROOTFS)/bin/%.lua: $(ROOTFS)/home/klye/lua/%.lua
 	cp $< $@
 
-$(VFS_IMAGE): $(BUILD_DIR)/mkvfs $(KBY_BINARIES) $(LUA_BIN_SCRIPTS) \
+$(VFS_IMAGE): $(BUILD_DIR)/mkvfs $(KBY_BINARIES) $(LUA_BIN_SCRIPTS) $(HELLO_ELF) \
              $(shell find $(ROOTFS) -type f ! -name '*.kby' 2>/dev/null)
 	$(BUILD_DIR)/mkvfs $(ROOTFS) $@
+
+# The first program loaded from the filesystem rather than linked into the
+# kernel.  A position independent static executable, built freestanding: there
+# is no C runtime to link against here, and a program that needed one would
+# stop in libc's own startup with nothing to report why.
+HELLO_ELF := $(ROOTFS)/bin/hello.elf
+
+$(HELLO_ELF): tests/hello.c | $(ROOTFS)/bin
+	$(CC) -static-pie -nostdlib -fno-stack-protector -O2 -o $@ $< \
+	      -Wl,-e,_start
 
 $(BUILD_DIR)/vfs_image.o: $(VFS_IMAGE)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@

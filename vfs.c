@@ -829,6 +829,40 @@ int vfs_open(const char *path)
     return index;
 }
 
+int vfs_read_at(const char *path, char *out, uint32_t offset, uint32_t max)
+{
+    int index = vfs_open(path);
+    uint32_t length;
+
+    if (index < 0 || out == 0) {
+        return -1;
+    }
+    length = vfs_nodes[index].size;
+    if (offset >= length) {
+        return 0;
+    }
+    if (length - offset < max) {
+        max = length - offset;
+    }
+    for (uint32_t at = 0; at < max;) {
+        uint32_t chunk = VFS_BLOCK_SIZE - ((offset + at) % VFS_BLOCK_SIZE);
+        const uint8_t *source;
+
+        if (chunk > max - at) {
+            chunk = max - at;
+        }
+        source = vfs_file_pointer(index, offset + at);
+        if (source == 0) {
+            break;
+        }
+        for (uint32_t index_byte = 0; index_byte < chunk; ++index_byte) {
+            out[at + index_byte] = (char)source[index_byte];
+        }
+        at += chunk;
+    }
+    return (int)max;
+}
+
 int vfs_read(const char *path, char *out, uint32_t max)
 {
     int index = vfs_open(path);

@@ -371,6 +371,62 @@ void vm_unmap_range(void *address, size_t bytes)
     }
 }
 
+void *vm_user_map_at(uint64_t virtual_address, size_t bytes)
+{
+    uint64_t first = virtual_address & ~(uint64_t)(VM_PAGE_BYTES - 1U);
+    uint64_t count = (uint64_t)((bytes + VM_PAGE_BYTES - 1U) / VM_PAGE_BYTES);
+    uint64_t last = first + count * VM_PAGE_BYTES;
+
+    vm_error_text[0] = 0;
+    if (bytes == 0U) {
+        return 0;
+    }
+    if ((virtual_address % VM_PAGE_BYTES) != 0U) {
+        vm_fail("the address must be page aligned");
+        return 0;
+    }
+    /* The window has to exist before its bounds can be tested against, and
+     * this is the first thing to touch it when a caller maps at an address it
+     * chose rather than asking for an allocation.  Without this the limit is
+     * still zero and every range is "not in the user window", which is the
+     * whole range of it. */
+    if (!vm_user_init()) {
+        return 0;
+    }
+    if (last < first || last > vm_user_limit) {
+        vm_fail("that range is not in the user window");
+        return 0;
+    }
+    for (uint64_t at = first; at < last; at += VM_PAGE_BYTES) {
+        void *frame = heap_alloc_frame();
+
+        if (frame == 0) {
+            for (uint64_t undo = first; undo < at; undo += VM_PAGE_BYTES) {
+                uint64_t physical = vm_to_physical(undo);
+
+                vm_unmap_page(undo);
+                if (physical != 0U) {
+                    heap_free_frame((void *)(uintptr_t)physical);
+                }
+            }
+            vm_fail("out of memory for the pages");
+            return 0;
+        }
+        {
+            uint64_t *words = (uint64_t *)frame;
+
+            for (uint32_t index = 0; index < VM_PAGE_BYTES / 8U; ++index) {
+                words[index] = 0;
+            }
+        }
+        if (!vm_map_user_page(at, (uint64_t)(uintptr_t)frame)) {
+            heap_free_frame(frame);
+            return 0;
+        }
+    }
+    return (void *)(uintptr_t)first;
+}
+
 void *vm_user_alloc_pages(size_t bytes)
 {
     uint64_t start;
@@ -568,4 +624,88 @@ uint64_t vm_to_physical(uint64_t virtual_address)
 const char *vm_error(void)
 {
     return vm_error_text;
+}
+
+/* The leaf entry for a virtual address, flags included, for diagnostics.
+ *
+ * There is no other way to see why an access was refused.  A missing page and
+ * a page that is present but not user accessible produce the same fault from
+ * the program's point of view, and only the entry itself says which it was. */
+/* Every level of the walk for an address, printed.
+ *
+ * A present PTE and a refused access can look identical from the program, and
+ * the level at which the walk goes wrong is the whole question: the identity
+ * map is set up by the boot code and works, so a walk that is correct for it
+ * is not necessarily correct for the dynamic windows, which are built here. */
+void vm_dump_walk(uint64_t virtual_address)
+{
+    uint32_t indices[4];
+    uint64_t *table = vm_table_at(vm_read_cr3());
+    static const char digits[] = "0123456789abcdef";
+
+    indices[0] = (uint32_t)((virtual_address >> 39) & 0x1FFU);
+    indices[1] = (uint32_t)((virtual_address >> 30) & 0x1FFU);
+    indices[2] = (uint32_t)((virtual_address >> 21) & 0x1FFU);
+    indices[3] = (uint32_t)((virtual_address >> 12) & 0x1FFU);
+    for (int level = 0; level < 4; ++level) {
+        uint64_t entry = table[indices[level]];
+
+        serial_write("    walk");
+        serial_putc((char)('0' + level));
+        serial_write("[");
+        serial_write_decimal(indices[level]);
+        serial_write("] = 0x");
+        for (int shift = 60; shift >= 0; shift -= 4) {
+            serial_putc(digits[(entry >> shift) & 0xFU]);
+        }
+        serial_write(" user=");
+        serial_putc((entry & PTE_USER) != 0U ? '1' : '0');
+        serial_write(" present=");
+        serial_putc((entry & PTE_PRESENT) != 0U ? '1' : '0');
+        serial_putc('\n');
+        if ((entry & PTE_PRESENT) == 0U || (entry & PTE_LARGE) != 0U) {
+            return;
+        }
+        table = vm_table_at(vm_entry_address(entry));
+    }
+    {
+        uint64_t leaf = table[indices[3]];
+
+        serial_write("    leaf = 0x");
+        for (int shift = 60; shift >= 0; shift -= 4) {
+            serial_putc(digits[(leaf >> shift) & 0xFU]);
+        }
+        serial_write(" user=");
+        serial_putc((leaf & PTE_USER) != 0U ? '1' : '0');
+        serial_putc('\n');
+    }
+}
+
+uint64_t vm_read_pte(uint64_t virtual_address)
+{
+    uint32_t pml4_index = (uint32_t)((virtual_address >> 39) & 0x1FFU);
+    uint32_t pdpt_index = (uint32_t)((virtual_address >> 30) & 0x1FFU);
+    uint32_t pd_index = (uint32_t)((virtual_address >> 21) & 0x1FFU);
+    uint32_t pt_index = (uint32_t)((virtual_address >> 12) & 0x1FFU);
+    uint64_t *level4 = vm_table_at(vm_read_cr3());
+    uint64_t *level3;
+    uint64_t *level2;
+    uint64_t *level1;
+
+    if ((level4[pml4_index] & PTE_PRESENT) == 0U) {
+        return 0;
+    }
+    level3 = vm_table_at(vm_entry_address(level4[pml4_index]));
+    if ((level3[pdpt_index] & PTE_PRESENT) == 0U) {
+        return 0;
+    }
+    level2 = vm_table_at(vm_entry_address(level3[pdpt_index]));
+    if ((level2[pd_index] & PTE_PRESENT) == 0U) {
+        return 0;
+    }
+    level1 = vm_table_at(vm_entry_address(level2[pd_index]));
+    if ((level1[pt_index] & PTE_PRESENT) == 0U) {
+        return 0;
+    }
+    return level1[pt_index];
 }

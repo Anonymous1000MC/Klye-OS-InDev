@@ -41,6 +41,17 @@ void *vm_alloc_pages(size_t bytes);
 void *vm_user_alloc_pages(size_t bytes);
 void vm_user_free_pages(void *address, size_t bytes);
 
+/* Map ring 3 memory at a specific address rather than at the next free one.
+ *
+ * An ELF loader has no choice here: a program's segments are mapped where its
+ * headers say they go, and every segment of a position independent binary is
+ * placed at the same offset from one base.  Allocating them wherever the
+ * window happened to be would work for no program at all.
+ *
+ * `virtual_address` must be page aligned and inside the user window.  Returns
+ * that address, or 0 with a reason in vm_error(). */
+void *vm_user_map_at(uint64_t virtual_address, size_t bytes);
+
 /* Map a range of physical addresses into the mapping window, without taking
  * frames for it, and release it again.  For hardware: a PCI base address
  * register names a place in the machine's physical address space that the CPU
@@ -65,6 +76,12 @@ void vm_unmap_page(uint64_t virtual_address);
 
 /* Translate a virtual address to its physical address, or 0 when unmapped. */
 uint64_t vm_to_physical(uint64_t virtual_address);
+
+/* The raw leaf page table entry, flags included, or 0 when unmapped.  For
+ * diagnostics: a page that is absent and a page that is present but not
+ * reachable from ring 3 raise the same fault, and only the entry itself
+ * distinguishes them. */
+uint64_t vm_read_pte(uint64_t virtual_address);
 
 /* Virtual address a page-table entry holds, with the flag bits removed. */
 uint64_t vm_entry_address(uint64_t entry);

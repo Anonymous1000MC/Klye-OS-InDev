@@ -23,6 +23,7 @@ extern long strtol(const char *text, char **end, int base);
 #include "scheduler.h"
 #include "pci.h"
 #include "user.h"
+#include "elf.h"
 #include "virtio.h"
 #include "shell.h"
 #include "theme.h"
@@ -1498,19 +1499,41 @@ static void cmd_virtio(void)
 
 /* "usertest" starts the ring 3 test program.
  *
- * There is no task and no scheduler behind this: the test is entered on the
- * current stack's terms and never comes back, which is enough to prove the
- * privilege switch, the syscall entry and the return, and not enough for
- * anything else.  A real program needs a stack of its own and a way to be
- * resumed, and that is the scheduler work this is standing in front of. */
+ * It does come back, and that is correct: the program is started as a task of
+ * its own, so this only waits for the scheduler to take it.  It used not to --
+ * the test was entered with an iretq from here and never returned, which is
+ * why the scheduler work was needed at all, and why the message that used to
+ * sit under this said coming back was unexpected.  It was, then.
+ */
 static void cmd_usertest(void)
 {
     if (user_run_test() == false) {
-        terminal_puts("  usertest: no user descriptors in the table\n");
+        terminal_puts("  usertest: could not start the test program\n");
         return;
     }
-    /* not reached: the program is elsewhere now */
-    terminal_puts("  usertest: the program came back, which is not expected\n");
+    terminal_puts("  usertest: started; its output follows on the serial port\n");
+}
+
+/* "elf <path>" loads an ELF executable from the filesystem and runs it.
+ *
+ * This is the first program that has ever been loaded from a file rather than
+ * linked into the kernel, so it is the point where the loader is exercised for
+ * real.  The program becomes a task of its own, exactly as the ring 3 test
+ * does, and its output arrives on the serial port while the shell is still
+ * here to have started it. */
+static void cmd_elf(const char *path)
+{
+    if (path == 0 || path[0] == 0) {
+        terminal_puts("  elf: give a path, for example: elf /bin/hello.elf\n");
+        return;
+    }
+    if (elf_run(path) == false) {
+        terminal_puts("  elf: ");
+        terminal_puts(elf_error());
+        terminal_puts("\n");
+        return;
+    }
+    terminal_puts("  elf: started; its output follows on the serial port\n");
 }
 
 static void cmd_sysinfo(void)
@@ -2843,6 +2866,8 @@ void shell_execute(const char *line)
         cmd_files();
     } else if (text_equal(tokens[0], "ata")) {
         cmd_ata();
+    } else if (text_equal(tokens[0], "elf")) {
+        cmd_elf(count > 1 ? tokens[1] : 0);
     } else if (text_equal(tokens[0], "usertest")) {
         cmd_usertest();
     } else if (text_equal(tokens[0], "virtio")) {

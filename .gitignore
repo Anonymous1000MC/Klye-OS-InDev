@@ -9,3 +9,7 @@ disk/**/*.wad
 *.wad
 *.WAD
 DOOM1.wad
+
+# Built by the ISO build from tests/hello.c.  Committed nowhere: it is a build
+# product, and the source plus the make rule are what belong in the tree.
+rootfs/bin/hello.elf
