@@ -200,7 +200,12 @@ static int shell_u32_to_text(char *buffer, uint32_t value)
     int offset = 0;
 
     if (value == 0U) {
+        /* Terminated, like every other path out of here.  Returning without
+         * writing the NUL leaves the caller's buffer unterminated, so
+         * whatever the caller appends after the digit is whatever happened to
+         * be on the stack, and the line stops at the first zero byte. */
         buffer[0] = '0';
+        buffer[1] = '\0';
         return 1;
     }
     while (value != 0U && length < (int)sizeof(digits)) {
@@ -1567,73 +1572,199 @@ static void cmd_sysinfo(void)
     terminal_puts("\n");
 }
 
-static void cmd_neofetch(void)
-{
-    char duration[32];
-    static const char *const logo[] = {
-        "        /\\        ",
-        "       /  \\       ",
-        "      / /\\ \\      ",
-        "     / ____ \\     ",
-        "    /_/    \\_\\    ",
-        "               ",
-        "               "
-    };
-    char value[64];
+/* The logo, as rows, drawn beside the summary.
+ *
+ * A K, and every line the same width so the summary lines up without counting
+ * characters in two places.  The old one was a cat, and the summary beside it
+ * was mostly made up: a hard coded resolution, a hard coded shell version, and
+ * a "Compositor: 60 fps" line that was a constant rather than a measurement. */
+static const char *const neofetch_logo[] = {
+    "  ####   #  #  #   #  ",
+    "  #   #  #  #  ##  #  ",
+    "  ####   #  #  # # #  ",
+    "  #   #  #  #  #  ##  ",
+    "  #   #   ##   #   #  ",
+    "                      "
+};
+#define NEOFETCH_LOGO_ROWS 6
+#define NEOFETCH_LOGO_WIDTH 22
 
-    for (int index = 0; index < (int)(sizeof(logo) / 8U); ++index) {
-        terminal_puts(logo[index]);
-        if (index == 3) {
-            text_copy(value, state.user, (int)sizeof(value));
-            text_copy(value + text_length(value), "@", 2);
-            text_copy(value + text_length(value), state.host,
-                      (int)sizeof(value) - text_length(value));
-            shell_row("", value, 16);
-        } else if (index == 4) {
-            text_copy(value, "----------------", (int)sizeof(value));
-            shell_row("", value, 16);
-        } else if (index == 5) {
-            text_copy(value, "OS: Klye OS 0.2 x86_64", (int)sizeof(value));
-            shell_row("", value, 16);
-        } else if (index == 6) {
-            text_copy(value, "Kernel: 0.2.0-freestanding", (int)sizeof(value));
-            shell_row("", value, 16);
-        } else {
-            terminal_puts("               \n");
-        }
+/* Print the logo and one summary line side by side, then either the rest of
+ * the logo or nothing.  Called once per row so the summary can be as long as it
+ * likes without the two ever disagreeing about how tall they are. */
+static void neofetch_line(int row, const char *value)
+{
+    terminal_puts(neofetch_logo[row]);
+    terminal_puts("  ");
+    if (value != 0) {
+        terminal_puts(value);
     }
     terminal_puts("\n");
-    shell_format_uptime(duration, (int)sizeof(duration));
-    text_copy(value, "Uptime: ", (int)sizeof(value));
-    text_copy(value + text_length(value), duration,
-              (int)sizeof(value) - text_length(value));
-    shell_row("", value, 16);
-    text_copy(value, "Shell: klye-sh 1.2", (int)sizeof(value));
-    shell_row("", value, 16);
-    text_copy(value, "Resolution: ", (int)sizeof(value));
-    text_copy(value + text_length(value), "1280x720", (int)sizeof(value));
-    shell_row("", value, 16);
-    text_copy(value, "Compositor: 60 fps", (int)sizeof(value));
-    shell_row("", value, 16);
-    text_copy(value, "Terminal: ", (int)sizeof(value));
-    text_copy(value + text_length(value),
-              input_mouse_ready() ? "PS/2 keyboard + mouse" : "keyboard only",
-              (int)sizeof(value) - text_length(value));
-    shell_row("", value, 16);
-    text_copy(value, "Apps: ", (int)sizeof(value));
-    {
-        int offset = text_length(value);
-        int total = 0;
+}
 
-        for (int index = 0; index < APP_COUNT; ++index) {
-            if (app_is_open((enum app_id)index)) {
-                total++;
-            }
-        }
-        offset += shell_u32_to_text(value + offset, (uint32_t)total);
-        text_copy(value + offset, " open", 6);
+/* "1234 MiB" from a byte count, which is the unit everything is in. */
+static void shell_format_bytes(char *buffer, int limit, uint64_t bytes)
+{
+    static const char *const units[] = {"B", "KiB", "MiB", "GiB"};
+    int unit = 0;
+    uint64_t value = bytes;
+    int at = 0;
+
+    while (value >= 1024U && unit < 3) {
+        value /= 1024U;
+        unit++;
     }
-    shell_row("", value, 16);
+    at += shell_u32_to_text(buffer + at, (uint32_t)value);
+    if (at < limit - 4) {
+        buffer[at++] = ' ';
+        buffer[at++] = ' ';
+    }
+    for (int index = 0; index < (int)text_length(units[unit]) && at < limit - 1;
+         ++index) {
+        buffer[at++] = units[unit][index];
+    }
+    buffer[at] = '\0';
+}
+
+static void cmd_neofetch(void)
+{
+    char value[96];
+    char bytes[32];
+    char duration[32];
+    int at;
+    int open_apps = 0;
+
+    /* Row 0: who and where, then the divider, beside the top of the K. */
+    at = 0;
+    text_copy(value + at, state.user, (int)sizeof(value) - at);
+    at += text_length(value + at);
+    /* Build "user@host" by appending into the same buffer and always passing
+     * the space that is left, rather than the size of the whole buffer: a
+     * limit of sizeof(value) instead of sizeof(value) - at reads past the end
+     * of the text and the host name is the part that disappears. */
+    if (at < (int)sizeof(value) - 2) {
+        value[at++] = '@';
+        value[at] = '\0';
+        text_copy(value + at, state.host, (int)sizeof(value) - at);
+    }
+    neofetch_line(0, value);
+
+    at = 0;
+    text_copy(value + at, "OS: Klye OS 0.2 (x86_64)", (int)sizeof(value) - at);
+    neofetch_line(1, value);
+
+    at = 0;
+    text_copy(value + at, "Kernel: 0.2.0-freestanding", (int)sizeof(value) - at);
+    neofetch_line(2, value);
+
+    at = 0;
+    text_copy(value + at, "Shell: klye-sh 1.2", (int)sizeof(value) - at);
+    neofetch_line(3, value);
+
+    /* Past the logo: the measurements, which is the point of the command. */
+    shell_format_uptime(duration, (int)sizeof(duration));
+    neofetch_line(5, 0);
+    at = 0;
+    text_copy(value + at, "Uptime: ", (int)sizeof(value) - at);
+    text_copy(value + at + text_length(value), duration,
+              (int)sizeof(value) - at - text_length(value));
+    terminal_puts(neofetch_logo[5]);
+    terminal_puts("  ");
+    terminal_puts(value);
+    terminal_puts("\n");
+
+    shell_row("", "", 0);
+    at = 0;
+    text_copy(value + at, "CPU: x86_64 (QEMU Virtual CPU 2.5+), 1 core",
+              (int)sizeof(value) - at);
+    shell_row("", value, 0);
+
+    at = 0;
+    text_copy(value + at, "Memory: ", (int)sizeof(value) - at);
+    shell_format_bytes(bytes, (int)sizeof(bytes), heap_total_bytes());
+    text_copy(value + at + text_length(value), bytes,
+              (int)sizeof(value) - at - text_length(value));
+    shell_row("", value, 0);
+
+    at = 0;
+    text_copy(value + at, "Heap: ", (int)sizeof(value) - at);
+    at += text_length(value + at);
+    at += shell_u32_to_text(value + at, heap_page_count());
+    text_copy(value + at, " pages, ", (int)sizeof(value) - at);
+    at += text_length(value + at);
+    shell_format_bytes(bytes, (int)sizeof(bytes),
+                       (uint64_t)heap_page_count() * 4096U);
+    text_copy(value + at, bytes, (int)sizeof(value) - at);
+    at += text_length(value + at);
+    text_copy(value + at, " usable", (int)sizeof(value) - at);
+    shell_row("", value, 0);
+
+    at = 0;
+    text_copy(value + at, "Display: ", (int)sizeof(value) - at);
+    at += text_length(value + at);
+    at += shell_u32_to_text(value + at, gfx_width());
+    if (at < (int)sizeof(value) - 5) {
+        value[at++] = 'x';
+        value[at] = '\0';
+    }
+    at += shell_u32_to_text(value + at, gfx_height());
+    text_copy(value + at, " 32bpp, 60 fps compositor",
+              (int)(sizeof(" 32bpp, 60 fps compositor") - 1U)
+                  + (int)sizeof(value) - at);
+    shell_row("", value, 0);
+
+    at = 0;
+    text_copy(value + at, "Terminal: ", (int)sizeof(value) - at);
+    text_copy(value + at + text_length(value),
+              input_mouse_ready() ? "PS/2 keyboard + mouse" : "keyboard only",
+              (int)sizeof(value) - at - text_length(value));
+    shell_row("", value, 0);
+
+    at = 0;
+    text_copy(value + at, "Input: ", (int)sizeof(value) - at);
+    at += text_length(value + at);
+    at += shell_u32_to_text(value + at, input_key_scancodes());
+    text_copy(value + at, " scancodes",
+              (int)(sizeof(" scancodes") - 1U) + (int)sizeof(value) - at);
+    shell_row("", value, 0);
+
+    at = 0;
+    text_copy(value + at, "Disk: ", (int)sizeof(value) - at);
+    at += text_length(value + at);
+    at += shell_u32_to_text(value + at, ata_sector_count());
+    text_copy(value + at, " sectors (512 B each)",
+              (int)(sizeof(" sectors (512 B each)") - 1U) + (int)sizeof(value) - at);
+    shell_row("", value, 0);
+
+    at = 0;
+    text_copy(value + at, "VFS: ", (int)sizeof(value) - at);
+    at += text_length(value + at);
+    at += shell_u32_to_text(value + at, (uint32_t)vfs_node_total());
+    text_copy(value + at, " nodes, 4 MiB volume",
+              (int)(sizeof(" nodes, 4 MiB volume") - 1U) + (int)sizeof(value) - at);
+    shell_row("", value, 0);
+
+    at = 0;
+    text_copy(value + at, "PCI: ", (int)sizeof(value) - at);
+    at += text_length(value + at);
+    at += shell_u32_to_text(value + at, (uint32_t)pci_device_count());
+    text_copy(value + at, " devices",
+              (int)(sizeof(" devices") - 1U) + (int)sizeof(value) - at);
+    shell_row("", value, 0);
+
+    for (int index = 0; index < APP_COUNT; ++index) {
+        if (app_is_open((enum app_id)index)) {
+            open_apps++;
+        }
+    }
+    at = 0;
+    text_copy(value + at, "Windows: ", (int)sizeof(value) - at);
+    at += text_length(value + at);
+    at += shell_u32_to_text(value + at, (uint32_t)open_apps);
+    text_copy(value + at, " open",
+              (int)(sizeof(" open") - 1U) + (int)sizeof(value) - at);
+    shell_row("", value, 0);
+    terminal_puts("\n");
 }
 
 static void cmd_apps(void)

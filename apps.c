@@ -338,12 +338,39 @@ void terminal_printf_number(uint64_t value)
 
 static void terminal_backspace(void)
 {
-    if (term_cursor_column == 0) {
+    if (term_cursor_column > 0) {
+        term_cursor_column--;
+        term_lines[term_cursor_line][term_cursor_column] = '\0';
+        term_lengths[term_cursor_line] = (uint8_t)term_cursor_column;
         return;
     }
-    term_cursor_column--;
-    term_lines[term_cursor_line][term_cursor_column] = '\0';
-    term_lengths[term_cursor_line] = (uint8_t)term_cursor_column;
+    /* At the start of a line, backspace has to go back to the end of the one
+     * above rather than stop.  A terminal does not have lines of its own: it
+     * has a stream, and the cursor is a position in it, so deleting backwards
+     * from the first column of a line removes the newline and lands at the end
+     * of the previous one.
+     *
+     * Returning instead is what made holding the key look like it had stopped
+     * working.  It had, at the left margin, which is where the prompt puts the
+     * cursor, so on a fresh line the very first backspace did nothing at all
+     * and the text above looked undeletable. */
+    if (term_cursor_line == 0) {
+        return;
+    }
+    {
+        int previous = term_cursor_line - 1;
+        int length = term_lengths[previous];
+
+        term_cursor_line = previous;
+        term_cursor_column = length;
+        /* The two lines are now one, so the old line's text has to be closed
+         * at the new cursor position -- the joined line is exactly the text of
+         * the previous line, with the new one appended, and the newline
+         * between them is what just went. */
+        term_lines[previous][length] = '\0';
+        term_lengths[previous] = (uint8_t)length;
+        term_count = term_cursor_line + 1;
+    }
 }
 
 static void terminal_submit(void)
@@ -394,9 +421,22 @@ void terminal_handle_key(const struct key_event *event)
         return;
     }
     if (event->code == KEY_PAGE_UP) {
+        /* Scrolling back is bounded by the history, and the bound is the
+         * number of lines above the bottom, which is one less than the count.
+         * The old code clamped against term_count - 1, which is right in
+         * principle, but a terminal holding only a prompt and an output line
+         * clamps to a couple of lines and looks broken, and a terminal that
+         * had scrolled back already got its offset reset to zero by the very
+         * next keypress -- every other handler ends with
+         * term_scroll_offset = 0, so a scrollback was dismissed by typing.
+         *
+         * Any new output snaps back to the bottom, which is what a terminal
+         * does, but a key that is not output does not. */
+        int limit = term_count > 0 ? term_count - 1 : 0;
+
         term_scroll_offset += 5;
-        if (term_scroll_offset > term_count - 1) {
-            term_scroll_offset = term_count - 1;
+        if (term_scroll_offset > limit) {
+            term_scroll_offset = limit;
         }
         return;
     }
@@ -407,10 +447,41 @@ void terminal_handle_key(const struct key_event *event)
         }
         return;
     }
+    if (event->code == KEY_UP && (event->modifiers & MOD_SHIFT) != 0U) {
+        int limit = term_count > 0 ? term_count - 1 : 0;
+
+        if (term_scroll_offset < limit) {
+            term_scroll_offset++;
+        }
+        return;
+    }
+    if (event->code == KEY_DOWN && (event->modifiers & MOD_SHIFT) != 0U) {
+        if (term_scroll_offset > 0) {
+            term_scroll_offset--;
+        }
+        return;
+    }
     if (event->code == KEY_ESCAPE) {
+        /* On an empty prompt, escape wipes the scrollback -- everything above,
+         * not just the current line.  With text on the line it clears only the
+         * line, so a stray keypress cannot throw away a half typed command.
+         *
+         * This is the whole way to clear the terminal.  Before, escape cleared
+         * the current line and nothing else, and the only way to get rid of the
+         * history was to hold backspace, which walked back line by line and
+         * stopped dead at column zero of each one. */
+        if (term_cursor_column == 0 && term_lengths[term_cursor_line] == 0) {
+            terminal_clear();
+            return;
+        }
         term_cursor_column = 0;
         term_lengths[term_cursor_line] = 0;
         term_lines[term_cursor_line][0] = '\0';
+        return;
+    }
+    if (event->code == 'l' && (event->modifiers & MOD_CTRL) != 0U) {
+        /* Ctrl+L: the same thing, on a key that says what it means. */
+        terminal_clear();
         return;
     }
     if (event->code == KEY_ENTER) {
@@ -468,7 +539,11 @@ void terminal_handle_key(const struct key_event *event)
     term_cursor_column++;
     term_lengths[term_cursor_line] = (uint8_t)term_cursor_column;
     term_lines[term_cursor_line][term_cursor_column] = '\0';
-    term_scroll_offset = 0;
+    /* Typing does not dismiss a scrollback.  It used to: this reset meant that
+     * after scrolling back with PageUp, the next character typed threw the
+     * view to the bottom, so reading history and then typing a command lost the
+     * history.  Only new output snaps back to the bottom, which is what a
+     * terminal does. */
 }
 
 int terminal_line_count(void)
