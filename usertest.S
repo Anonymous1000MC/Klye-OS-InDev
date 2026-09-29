@@ -181,10 +181,18 @@ user_canary_entry:
     je 2f
     movb $75, canary_report+10(%rip)
 2:
+    /* r10 is the sixth syscall argument and the SysV seventh, so a stub that
+     * marshals arguments touches it.  It was also the scratch register the
+     * sysretq selector build used, which is a clobber of its own. */
+    movq $0xAAAA, %r11
+    cmpq %r11, %r10
+    je 2f
+    movb $76, canary_report+11(%rip)
+2:
     movq $1, %rax
     movq $1, %rdi
     leaq canary_report(%rip), %rsi
-    movq $11, %rdx
+    movq $12, %rdx
     syscall
     movq $1, %rax
     movq $1, %rdi
@@ -199,7 +207,7 @@ user_canary_entry:
     jmp 1b
 
 canary_report:
-    .byte 0x2E, 0x2E, 0x2E, 0x2E, 0x2E, 0x2E, 0x2E, 0x2E, 0x2E, 0x2E, 0x2E
+    .byte 0x2E, 0x2E, 0x2E, 0x2E, 0x2E, 0x2E, 0x2E, 0x2E, 0x2E, 0x2E, 0x2E, 0x2E
 canary_bad:
     .ascii "X"
 canary_done:

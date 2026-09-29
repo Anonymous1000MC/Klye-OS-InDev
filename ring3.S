@@ -338,11 +338,7 @@ syscall_return:
      * about to jump to, and overwriting it is how the return ended up at
      * 0x1B00000000 -- the stack selector executed as code, with no fault until
      * the fetch. */
-    movq $0x23, %rax
-    shlq $48, %rax
-    movq $0x1B, %r10
-    shlq $32, %r10
-    orq %r10, %rax
+    movq $0x0023001B00000000, %rax
     orq %r11, %rax
     movq %rax, %r11
     sysretq
