@@ -8,3 +8,5 @@ Each file is the state of one piece of work; the newest is at the top of
 - `ring3.md`   -- ring 3, the syscall path, and the faults behind them
 - `elf.md`     -- ELF loader and the Linux syscall ABI
 - `lessons.md` -- mistakes made here, so they are not made again
+- `harness/`   -- QEMU scripts for testing the desktop, and how to drive it
+- `../tests/musl/` -- guest test programs, and the ABI bisection behind the rax bug

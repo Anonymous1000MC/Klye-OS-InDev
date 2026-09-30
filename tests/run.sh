@@ -118,6 +118,9 @@ if ! "$out/gfx_test"; then
     status=1
 fi
 
+# The musl test programs are not built here: they need musl-gcc and the guest,
+# and they are built and run by hand.  See tests/musl/README.md.
+
 # The settings store: clamping on the way in and out, unknown keys tolerated,
 # a save that truncates.  Stubbed filesystem, so this is the store and not the
 # VFS under it.
