@@ -847,10 +847,22 @@ void terminal_draw(struct gfx_surface *surface, int x, int y, int width,
         int line_index = first + row;
         int baseline = y + TERMINAL_HEADER + TERMINAL_PAD_Y +
                        row * TERMINAL_LINE_HEIGHT + TEXT_ASCENT;
+        int row_top = baseline - TEXT_ASCENT;
+        int row_bottom = row_top + TERMINAL_LINE_HEIGHT;
         int length;
 
         if (line_index >= term_count) {
             break;
+        }
+        /* Skip rows the damage does not reach.
+         *
+         * Without this a repaint of a 96x96 region -- a cursor blink, a
+         * window edge -- redrew every visible line of the terminal, and each
+         * of those is a bilinear glyph run per character.  A terminal is the
+         * most expensive thing on screen and it was being repainted whole for
+         * a few changed pixels. */
+        if (!gfx_row_visible(row_top, row_bottom)) {
+            continue;
         }
         length = term_lengths[line_index];
         if (length > columns) {

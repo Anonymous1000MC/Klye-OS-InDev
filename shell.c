@@ -3069,6 +3069,23 @@ void shell_execute(const char *line)
         terminal_puts("bench: measured ");
         terminal_puts(shell_u32_to_text_scratch(rounds));
         terminal_puts(" full composite frames (cycles in serial log)\n");
+    } else if (text_equal(tokens[0], "ibench")) {
+        /* The incremental path, which is what a running desktop actually
+         * does.  bench damages the whole screen and so measures the worst
+         * case; this measures a small damaged region, which is the number
+         * that decides what framerate is reachable. */
+        uint32_t rounds = 200U;
+
+        if (count > 1) {
+            rounds = (uint32_t)shell_atoi_value(tokens[1]);
+            if (rounds == 0U || rounds > 2000U) {
+                rounds = 200U;
+            }
+        }
+        wm_benchmark_incremental(rounds);
+        terminal_puts("ibench: measured ");
+        terminal_puts(shell_u32_to_text_scratch(rounds));
+        terminal_puts(" incremental frames (cycles in serial log)\n");
     } else if (text_equal(tokens[0], "kbyrun")) {
         cmd_kbyrun(tokens, count);
     } else if (text_equal(tokens[0], "which")) {

@@ -47,6 +47,13 @@ void gfx_blit(struct gfx_surface *destination, int x, int y, int width,
 void gfx_blit_alpha(struct gfx_surface *destination, int x, int y, int width,
                     int height, const struct gfx_surface *source,
                     int source_x, int source_y, uint32_t alpha);
+/* Damage clipping.  gfx_set_clip narrows every subsequent drawing call to the
+ * rectangle; gfx_clip_none restores it.  The primitives intersect it internally,
+ * so nothing has to be told about it twice. */
+void gfx_set_clip(int x, int y, int width, int height);
+void gfx_clip_none(void);
+bool gfx_row_visible(int top, int bottom);
+
 void gfx_pixel(struct gfx_surface *surface, int x, int y, uint32_t color);
 void gfx_blend_pixel(struct gfx_surface *surface, int x, int y,
                      uint32_t color, uint32_t alpha);

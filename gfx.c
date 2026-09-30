@@ -45,9 +45,63 @@ static uint8_t radius_inset[GFX_MAX_RADIUS + 1][GFX_MAX_RADIUS + 1];
 static uint8_t radius_alpha[GFX_MAX_RADIUS + 1][GFX_MAX_RADIUS + 1];
 static bool radius_ready;
 
+/* The clip rectangle, and the choke point every drawing call goes through.
+ *
+ * Damage tracking computes a rectangle, and redrawing respects it.  Before
+ * this, the compositor computed which parts of the screen had changed and then
+ * ignored it: draw_window took no clip, draw_desktop_icons took no clip, and
+ * every frame repainted all 921600 pixels.  That is why a full recompose took
+ * 29.7 ms and the machine managed 33 fps while the boot screen claimed 60.
+ *
+ * Clipping here rather than threading a rectangle through every drawing
+ * function means it cannot be forgotten: a primitive that does not know about
+ * damage is still clipped by the one function all of them call. */
+static struct gfx_rect gfx_clip = {
+    /* Open by default.  A zero-initialised clip would silently draw nothing at
+     * all until something called gfx_clip_none, and the host tests draw into a
+     * surface without a compositor around them -- so gfx_fill would quietly
+     * return and the tests would fail on an empty canvas with nothing to do
+     * with damage. */
+    -0x40000000, -0x40000000, 0x80000000, 0x80000000
+};
+
 static bool surface_writable(const struct gfx_surface *surface)
 {
     return surface != NULL && surface->pixels != NULL;
+}
+
+/* Is this pixel inside the current clip?  One compare on the left, one on the
+ * top, one on the right, one on the bottom, and the loops below only visit what
+ * survives.  With a clip set this is the difference between repainting a
+ * window and repainting the screen. */
+
+/* Does a vertical span intersect the clip?  Used by callers that loop over
+ * rows -- a terminal drawing one line at a time -- to skip the ones the damage
+ * does not reach without doing any per pixel work first. */
+bool gfx_row_visible(int top, int bottom)
+{
+    if (bottom < gfx_clip.y || top >= gfx_clip.y + gfx_clip.height) {
+        return false;
+    }
+    return true;
+}
+
+void gfx_set_clip(int x, int y, int width, int height)
+{
+    gfx_clip.x = x;
+    gfx_clip.y = y;
+    gfx_clip.width = (width > 0) ? width : 0;
+    gfx_clip.height = (height > 0) ? height : 0;
+}
+
+void gfx_clip_none(void)
+{
+    /* The whole surface.  Checked per pixel against whatever the surface is,
+     * which the primitives already do, so this costs nothing extra. */
+    gfx_clip.x = -0x40000000;
+    gfx_clip.y = -0x40000000;
+    gfx_clip.width = 0x80000000;
+    gfx_clip.height = 0x80000000;
 }
 
 int gfx_clampi(int value, int minimum, int maximum)
@@ -473,6 +527,25 @@ void gfx_fill(struct gfx_surface *surface, int x, int y, int width, int height,
     }
     x_end = x + width;
     y_end = y + height;
+    /* Narrowed to the clip rectangle.  Doing it once here means the loops
+     * below do not have to know about damage at all. */
+    if (x < gfx_clip.x) {
+        x = gfx_clip.x;
+    }
+    if (y < gfx_clip.y) {
+        y = gfx_clip.y;
+    }
+    if (x_end > gfx_clip.x + gfx_clip.width) {
+        x_end = gfx_clip.x + gfx_clip.width;
+    }
+    if (y_end > gfx_clip.y + gfx_clip.height) {
+        y_end = gfx_clip.y + gfx_clip.height;
+    }
+    width = x_end - x;
+    height = y_end - y;
+    if (width <= 0 || height <= 0) {
+        return;
+    }
     if (x < 0) {
         x = 0;
     }
@@ -506,12 +579,18 @@ void gfx_fill(struct gfx_surface *surface, int x, int y, int width, int height,
     }
 }
 
+/* One pixel, clipped.  Every other primitive narrows its loops to the clip
+ * rectangle; this one has no loop, so it tests directly. */
 void gfx_pixel(struct gfx_surface *surface, int x, int y, uint32_t color)
 {
     if (!surface_writable(surface)) {
         return;
     }
 
+    if (x < gfx_clip.x || y < gfx_clip.y || x >= gfx_clip.x + gfx_clip.width ||
+        y >= gfx_clip.y + gfx_clip.height) {
+        return;
+    }
     if (x < 0 || y < 0 || x >= (int)surface->width || y >= (int)surface->height) {
         return;
     }
@@ -568,6 +647,25 @@ void gfx_blend_rect(struct gfx_surface *surface, int x, int y, int width,
     }
     x_end = x + width;
     y_end = y + height;
+    /* Narrowed to the clip rectangle.  Doing it once here means the loops
+     * below do not have to know about damage at all. */
+    if (x < gfx_clip.x) {
+        x = gfx_clip.x;
+    }
+    if (y < gfx_clip.y) {
+        y = gfx_clip.y;
+    }
+    if (x_end > gfx_clip.x + gfx_clip.width) {
+        x_end = gfx_clip.x + gfx_clip.width;
+    }
+    if (y_end > gfx_clip.y + gfx_clip.height) {
+        y_end = gfx_clip.y + gfx_clip.height;
+    }
+    width = x_end - x;
+    height = y_end - y;
+    if (width <= 0 || height <= 0) {
+        return;
+    }
     if (x < 0) {
         x = 0;
     }
@@ -613,6 +711,25 @@ void gfx_blit(struct gfx_surface *destination, int x, int y, int width,
     }
     x_end = x + width;
     y_end = y + height;
+    /* Narrowed to the clip rectangle.  Doing it once here means the loops
+     * below do not have to know about damage at all. */
+    if (x < gfx_clip.x) {
+        x = gfx_clip.x;
+    }
+    if (y < gfx_clip.y) {
+        y = gfx_clip.y;
+    }
+    if (x_end > gfx_clip.x + gfx_clip.width) {
+        x_end = gfx_clip.x + gfx_clip.width;
+    }
+    if (y_end > gfx_clip.y + gfx_clip.height) {
+        y_end = gfx_clip.y + gfx_clip.height;
+    }
+    width = x_end - x;
+    height = y_end - y;
+    if (width <= 0 || height <= 0) {
+        return;
+    }
     if (x < 0) {
         source_x += -x;
         width += x;

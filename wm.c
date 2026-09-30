@@ -562,8 +562,18 @@ static void draw_desktop_icons(struct gfx_surface *surface)
     int y = desktop_top() + 34;
 
     for (int index = APP_COUNT - 1; index >= 0; --index) {
-        app_draw_icon(surface, (enum app_id)index, icon_x, y,
-                      THEME_DOCK_ICON);
+        /* Icons are drawn in a fixed column down the left edge, and the label
+         * sits below the icon, so an icon's vertical extent is known before
+         * anything is drawn.  Skipping the ones the damage does not reach is
+         * what stopped this being the most expensive thing on the screen: at
+         * bilinear glyph scaling with a shadowed label each one costs more than
+         * a window redraw, and all of them were drawn for every repaint of
+         * anything anywhere. */
+        int icon_bottom = y + THEME_DOCK_ICON + 18 + FONT_ASCENT;
+
+        if (gfx_row_visible(y - 2, icon_bottom)) {
+            app_draw_icon(surface, (enum app_id)index, icon_x, y,
+                          THEME_DOCK_ICON);
         /* The label is drawn with a shadow behind it rather than a filled
          * rounded rectangle.
          *
@@ -574,10 +584,11 @@ static void draw_desktop_icons(struct gfx_surface *surface)
          * choice.  A shadow separates the text from whatever is behind it
          * without drawing anything, so it works on a photograph and on a flat
          * colour alike. */
-        font_draw_centered_shadow(surface, icon_x + THEME_DOCK_ICON / 2,
-                                  y + THEME_DOCK_ICON + 18,
-                                  app_name((enum app_id)index),
-                                  THEME_TEXT_ON_DARK, 1);
+            font_draw_centered_shadow(surface, icon_x + THEME_DOCK_ICON / 2,
+                                      y + THEME_DOCK_ICON + 18,
+                                      app_name((enum app_id)index),
+                                      THEME_TEXT_ON_DARK, 1);
+        }
         y += THEME_DOCK_ICON + 46;
     }
 }
@@ -1342,14 +1353,44 @@ static void draw_window(struct gfx_surface *surface, struct wm_window *window)
 static void draw_cursor_overlay_region(struct gfx_surface *surface,
                                        const struct gfx_rect *r);
 
+/* Per-stage cycle counters, so the frame cost is attributed rather than
+ * guessed at.  The first round of optimisation on this path changed nothing
+ * because the assumption about which stage was slow turned out to be wrong.
+ */
+static uint64_t wm_stage_wallpaper;
+static uint64_t wm_stage_icons;
+static uint64_t wm_stage_windows;
+static uint64_t wm_stage_present;
+static uint64_t wm_stage_count;
+static uint64_t wm_stage_mark;
+static uint64_t read_tsc(void);
+
 static void redraw_region(struct gfx_surface *surface, const struct gfx_rect *r)
 {
     if (gfx_rect_empty(r)) {
         return;
     }
-    gfx_blit(surface, r->x, r->y, r->width, r->height, wm.wallpaper, r->x,
-             r->y);
-    draw_desktop_icons(surface);
+    /* Everything below draws only inside r.  Set once here and every primitive
+     * obeys it, so a window that does not intersect the damage costs three
+     * comparisons instead of a full repaint. */
+    {
+        uint64_t t0;
+        uint64_t t1;
+        uint64_t t2;
+
+        gfx_set_clip(r->x, r->y, r->width, r->height);
+        t0 = read_tsc();
+        wm_stage_mark = t0;
+        gfx_blit(surface, r->x, r->y, r->width, r->height, wm.wallpaper, r->x,
+                 r->y);
+        t1 = read_tsc();
+        draw_desktop_icons(surface);
+        t2 = read_tsc();
+        wm_stage_mark = t2;
+        wm_stage_wallpaper += t1 - t0;
+        wm_stage_icons += t2 - t1;
+        wm_stage_count++;
+    }
 
     {
         struct wm_window *ordered[WM_WINDOW_LIMIT];
@@ -1383,6 +1424,13 @@ static void redraw_region(struct gfx_surface *surface, const struct gfx_rect *r)
             }
             draw_window(surface, window);
         }
+    }
+    {
+        uint64_t t3;
+
+        t3 = read_tsc();
+        wm_stage_windows += t3 - wm_stage_mark;
+        wm_stage_mark = t3;
     }
     {
         struct gfx_rect menubar_rect;
@@ -1421,6 +1469,7 @@ static void redraw_region(struct gfx_surface *surface, const struct gfx_rect *r)
         }
     }
     draw_cursor_overlay_region(surface, r);
+    gfx_clip_none();
 }
 
 static void draw_cursor_overlay_region(struct gfx_surface *surface,
@@ -1558,6 +1607,75 @@ void wm_benchmark(uint32_t iterations)
     serial_write("\n");
     gfx_damage_all();
     wm.chrome_dirty = 1;
+}
+
+/* The incremental path, measured.
+ *
+ * wm_benchmark damages the whole screen, which is the worst case and is not
+ * what a running desktop does: it only ever repaints what changed.  This
+ * damages a small region each iteration and measures that, which is the number
+ * that decides whether 144 fps is reachable.  A full recompose at 29.7 ms is
+ * 33 fps and no amount of tuning changes that, because the cost is 921600
+ * pixels of wallpaper and window paint. */
+static void repaint_damage(void);
+
+void wm_benchmark_incremental(uint32_t iterations)
+{
+    uint64_t start;
+    uint64_t elapsed;
+    uint64_t per_frame;
+    uint64_t tick_start;
+    uint64_t tick_end;
+    const int region_size = 96;
+
+    if (iterations == 0U) {
+        iterations = 200U;
+    }
+    /* Start from a known state. */
+    gfx_damage_all();
+    wm.chrome_dirty = 1U;
+    repaint_damage();
+    gfx_present();
+    tick_start = wm_uptime_ticks();
+    start = read_tsc();
+    for (uint32_t index = 0; index < iterations; ++index) {
+        int x = 100 + (int)(index % 200U);
+
+        gfx_damage(x, 100, region_size, region_size);
+        repaint_damage();
+        gfx_present();
+    }
+    elapsed = read_tsc() - tick_start + (read_tsc() - start);
+    tick_end = wm_uptime_ticks();
+    per_frame = elapsed / (uint64_t)iterations;
+    serial_write("BENCH incremental frames=");
+    log_u64((uint64_t)iterations);
+    serial_write(" cycles_per_frame=");
+    log_u64(per_frame);
+    serial_write(" ms_per_frame=");
+    log_u64((tick_end - tick_start) / (uint64_t)iterations);
+    serial_write(" fps=");
+    log_u64(tick_end > tick_start
+                ? ((uint64_t)iterations * 1000U) / (tick_end - tick_start)
+                : 0U);
+    serial_write("\n");
+    gfx_damage_all();
+    wm.chrome_dirty = 1U;    if (wm_stage_count > 0U) {
+        serial_write("STAGE cycles/frame wallpaper=");
+        log_u64(wm_stage_wallpaper / wm_stage_count);
+        serial_write(" icons=");
+        log_u64(wm_stage_icons / wm_stage_count);
+        serial_write(" windows=");
+        log_u64(wm_stage_windows / wm_stage_count);
+        serial_write(" total=");
+        log_u64(wm_stage_present / wm_stage_count);
+        serial_write("\n");
+        wm_stage_wallpaper = 0U;
+        wm_stage_icons = 0U;
+        wm_stage_windows = 0U;
+        wm_stage_present = 0U;
+        wm_stage_count = 0U;
+    }
 }
 
 static void repaint_damage(void)
@@ -2753,8 +2871,17 @@ void wm_service(void)
             wm.fps_window_start = (uint32_t)pit_ticks();
         }
     }
-    repaint_damage();
-    gfx_present();
+    {
+        uint64_t p0;
+
+        p0 = read_tsc();
+        repaint_damage();
+        gfx_present();
+        wm_stage_present += read_tsc() - p0;
+        if (wm_stage_count > 0U) {
+            wm_stage_count++;
+        }
+    }
     wm.present_count++;
     if (shell_reboot_pending()) {
         shell_machine_reboot();
