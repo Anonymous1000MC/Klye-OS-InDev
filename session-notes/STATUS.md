@@ -1,7 +1,114 @@
 # Status
 
-Last updated: musl reaches main and returns 42. HEAD `0d6cb95`, working tree
-clean apart from two untracked binaries.
+Last updated: 2026-09-30, end of the compositor and desktop session.
+HEAD `cd75cd9`, pushed, tree clean.
+
+## The headline
+
+Two things landed today, and they are independent of each other.
+
+**The compositor now beats its target.** 144 fps was asked for; the incremental
+path measures 228 to 230.  It was at 33.  The whole gap was damage tracking that
+was computed and then ignored -- see "Performance" below, which is where the
+interesting part is.
+
+**musl reached main and returned 42**, and then a day of chasing the remaining
+syscall fault ended with a real answer: the `sysretq` selector pair was being
+built in `rax`, overwriting the syscall's return value.  Four separate bugs in
+the return path, all in about twenty instructions, all of which presented as a
+fault somewhere else entirely.
+
+## Performance
+
+    ibench 300      228 fps     incremental repaint, what a running desktop does
+    bench 40        25 fps      full-screen recompose, the worst case
+
+Both are correct.  `bench` deliberately damages every pixel, so 25 fps is what a
+full recompose costs; a desktop that only repaints what changed is `ibench`.
+The boot screen reports the measured rate rather than claiming 60, which it used
+to do while the compositor was managing 33.
+
+The 33 to 228 came from two things.  Clipping: a rectangle in `gfx.c` that
+every primitive intersects against, so a window that does not intersect the
+damage costs three comparisons instead of a full repaint.  And then, after the
+clipping was in and nothing much had changed, per-stage counters that said
+desktop icons were 1.23M cycles a frame against 540k for everything else -- an
+icon with a shadowed label, drawn at bilinear glyph scaling, repainted for
+damage anywhere on screen.
+
+`STAGE` in the bench output attributes a frame.  Use it before optimising
+anything here; the first guess about where the time went was wrong twice.
+
+## The desktop
+
+Rewritten away from a Mac-like arrangement.  The top menubar, the bottom dock
+and the Apple logo are deleted, not restyled.  What is there now:
+
+- **A taskbar.**  Opaque, along the bottom.  Launcher at the left, a labelled
+  button per running window in the middle, the clock at the right.  A button
+  raises its window, or lowers it if it was already in front.  A minimized
+  window keeps its button: removing it would move every other button.
+- **A start menu** opening upward from the launcher, so the button does not
+  move.  Applications, then Settings, then the windows that are open.
+- **Windows resize** in eight zones with a grab area wider than the drawn
+  border, snap to the edges on the drop rather than during the drag, maximize
+  from the title bar button or a double click, and restore to where they were.
+- **Settings is a real program.**  A store of keys with ranges, loaded at
+  startup and saved on change, in a plain `key=value` file.  It was a picture
+  of a settings application with fixed numbers on it.
+
+Verified against screendumps, not by reading the code: resize 946x523 to
+1030x614, maximize to full width, the start menu with five legible items, the
+clock reading 03:56.
+
+## Still broken
+
+**Buffered stdio hangs.**  `printf` writes its first buffer and the second
+`writev` is handed a length of `-24` that gets more negative each call, with the
+base walking forward 27 bytes at a time.  musl is computing
+`iov_len - bytes_written` and going negative, so its `FILE` has a bad length in
+it.  The kernel's own `writev` is proven correct: `e1.S` and `e2.S` in
+`tests/musl/` do two calls with a caller-owned vector and succeed.
+
+The one untested interaction left is the window-size `ioctl`.  It answers 80x24
+and musl may be doing something with that which is what puts `f->nbytes` into
+this state.  Try returning ENOTTY again now that other things are fixed -- it
+used to make musl abort in its own startup, but that was before the return value
+bug was found, so the conclusion it was based on may not hold.
+
+## 16 of ~450 syscalls
+
+    files     open openat read readv close lseek
+    output    write writev
+    memory    brk mmap            (anonymous only)
+    threads   set_tid_address gettid
+    other     arch_prctl ioctl rt_sigprocmask
+
+Missing and needed next, roughly in order: `fstat`, `fcntl`, `munmap`,
+`mprotect`, a writable filesystem with a Linux directory layout, `fork`,
+`execve`, `wait4`, file-backed `mmap`, `PT_INTERP`.
+
+**Static busybox** is the right next milestone -- about 40 syscalls, and it
+exercises fork, exec, pipes, dup, wait, getdents and stat in one go.  Not
+`pacman`: it is dynamically linked against glibc and would install binaries
+that this kernel cannot run.
+
+## Not done
+
+- App icons are unchanged and the system apps still have Mac-flavoured chrome
+  internally.  This is the last item of the desktop rewrite and is untouched.
+- A taskbar button does not have a context menu, and the start menu has no
+  search.
+- Window snapping is edges only: no half-screen snap, no corner quadrants.
+
+## Where the work was
+
+    20 commits   compositor damage clipping and the 3x
+    6 commits    taskbar, start menu, resize, snap, maximize
+    3 commits    settings
+    4 commits    the syscall return path: rbx, rax, FS base, brk/mmap overlap
+    2 commits    8x16 font and bilinear glyph scaling
+    1 commit     launcher icon out of range, which was a kernel panic
 
 ## The headline
 
