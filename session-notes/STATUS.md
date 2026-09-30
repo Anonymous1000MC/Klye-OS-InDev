@@ -108,6 +108,24 @@ bare syscall and reads the registers immediately after, with no function call in
 between. A program that receives the value as a call argument and then calls
 another function is exercising something the canary does not.
 
+**One real bug found and fixed while chasing this.** The heap was mapped
+starting at the *top* of the stack region and growing up, which is inside the
+stack, because a stack grows down. Both regions are mapped and writable, so
+nothing faulted and the register canary passed: the corruption was of program
+data, not registers, which is exactly why it looked like a return-value bug.
+The heap now sits below the stack, in the gap between the image and the stack
+bottom.  This did not fix the return values, so the overlap was real and the
+cause was not -- both were true.
+
+**Still not diagnosed, and the lead worth having:** the register canary never
+checks `rax`.  It is the one register a syscall is allowed to change and the
+only one that carries data, and every test so far has relied on some other
+register to prove the return arrived.  A test that asks for a return value and
+compares it, rather than inferring it from a side effect, is the missing piece.
+Suspect the frame's rax slot specifically: a syscall returning a literal
+(arch_prctl -> 0) works, and one returning a loop counter (write) does not,
+which is a compiler-code-shape question and not a logic one.
+
 **Not diagnosed.** Next step is not to guess: print the return value in the
 canary after a real call-and-return sequence, or find where the frame's rax
 slot is read back differently from the canary's path. Everything needed to

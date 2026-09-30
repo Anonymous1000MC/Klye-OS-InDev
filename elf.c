@@ -700,19 +700,45 @@ bool elf_run(const char *path)
          * inside a region the program owns and does not map more on demand, so
          * the region has to exist before the program asks for it. */
         {
-            uint64_t heap_low = stack_region_top;
-            uint64_t heap_high = heap_low + ELF_HEAP_BYTES;
+            /* The heap goes *below* the stack, in the gap between the end of
+             * the program image and the bottom of the stack region.
+             *
+             * It used to start at the top of the stack and grow up, which
+             * looks correct if you imagine a stack that grows up.  A stack
+             * grows down: its first frame is already at the top, so a heap
+             * beginning there is inside the stack from the first instruction.
+             * The symptom was not a fault, because both regions are mapped and
+             * writable -- it was musl's malloc for stdio's buffer landing on
+             * the program's own frame, so a program read back a stack address
+             * where the result of write(2) should have been, and the same
+             * uninitialised value every time.
+             *
+             * Nothing faults, nothing panics, and the register canary passes,
+             * because the corruption is of the program's data and not of its
+             * registers.  That is what made it look like a return-value bug.
+             */
+            uint64_t heap_high = low;              /* bottom of the stack */
+            uint64_t heap_low = heap_high - ELF_HEAP_BYTES;
 
-            if (vm_user_map_at(heap_low & ~(uint64_t)(VM_PAGE_BYTES - 1U),
-                               (size_t)ELF_HEAP_BYTES) == 0) {
-                elf_fail(vm_error());
-                return false;
+            /* Not enough room between the image and the stack.  Give the
+             * program a stack anyway and say so, rather than mapping a heap
+             * over the image. */
+            if (heap_low < image_end + bias) {
+                heap_low = image_end + bias;
+                heap_high = heap_low;
             }
-            user_set_heap(heap_low, heap_high);
-            /* mmap is a bump allocation from the same window, and that window's
-             * pointer still points at the bottom, where this program's own
-             * segments are.  Tell it where the program ends. */
-            vm_set_mmap_base(heap_high);
+            if (heap_high > heap_low) {
+                if (vm_user_map_at(heap_low & ~(uint64_t)(VM_PAGE_BYTES - 1U),
+                                   (size_t)(heap_high - heap_low)) == 0) {
+                    elf_fail(vm_error());
+                    return false;
+                }
+                user_set_heap(heap_low, heap_high);
+                /* mmap is a bump allocation from the same window, and that
+                 * window's pointer still points at the bottom, where this
+                 * program's own segments are.  Tell it where the program ends. */
+                vm_set_mmap_base(heap_high);
+            }
         }
     }
 
