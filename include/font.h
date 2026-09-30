@@ -15,6 +15,19 @@
 #define FONT_MIN_SCALE 1
 #define FONT_MAX_SCALE 4
 
+/* The 8x16 font, alongside the 8x8 one.  Both are present rather than one
+ * replacing the other: 8x8 is what the shell has always drawn with and it is
+ * what fits the existing line spacing everywhere, and 8x16 is legible enough to
+ * read comfortably and carries the full Latin-1 range including the box-drawing
+ * characters.  Which one is used is a choice at the call site. */
+#define FONT8X16_HEIGHT 16
+#define FONT8X16_ASCENT 12
+#define FONT8X16_DESCENT 4
+#define FONT8X16_ADVANCE 8
+#define FONT8X16_LINE_HEIGHT FONT8X16_HEIGHT
+
+uint8_t font8x16_row(uint8_t character, int row);
+
 uint8_t font_glyph(char character, int row);
 int font_char_count(const char *text);
 int font_text_width(const char *text, int scale);

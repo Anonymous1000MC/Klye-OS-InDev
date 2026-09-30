@@ -118,6 +118,19 @@ if ! "$out/gfx_test"; then
     status=1
 fi
 
+# The 8x16 font.  The properties here are ones a wrong table offset still
+# passes -- letters that have ink, glyphs that are not blank -- and the ones it
+# fails: a capital with no ink in the top half is a table shifted by a row, and
+# looks like text while sitting half a line below where it belongs.
+$cc $cflags -c "$here/font8x16_test.c" -o "$out/font8x16_test.o"
+$cc $cflags -c "$here/../font8x16.c" -o "$out/font8x16.o"
+$cc "$out/font8x16_test.o" "$out/font8x16.o" "$out/stubs.o" \
+    -o "$out/font8x16_test"
+if ! "$out/font8x16_test"; then
+    echo "font8x16_test FAILED"
+    status=1
+fi
+
 # PNG decoding, against a decode of the wallpaper made with zlib.  The window
 # bug this covers only shows up on an image larger than the 32 KiB DEFLATE
 # back reference window, so the small fixtures that came before it were all
