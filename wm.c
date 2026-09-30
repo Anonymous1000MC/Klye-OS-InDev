@@ -1227,7 +1227,7 @@ static void draw_window_content(struct gfx_surface *surface,
                 "Rounded corners", "Frosted surfaces", "Dock magnification"
             };
             static const char *const values[] = {
-                "60 fps (1000 hz timer)", "enabled", "double buffered",
+                "measured, 1000 hz timer", "enabled", "double buffered",
                 "anti-aliased", "enabled", "1.55x"
             };
             int row = y + 62;
@@ -1277,8 +1277,48 @@ static void draw_window_content(struct gfx_surface *surface,
                            "freestanding x86_64 kernel", THEME_TEXT_TERTIARY, 1);
         gfx_horizontal_line(surface, x + 40, y + 204, width - 80,
                             THEME_SEPARATOR);
-        font_draw_centered(surface, x + width / 2, y + 222, "compositor 60 fps",
-                           THEME_TEXT_TERTIARY, 1);
+        /* The measured frame rate, not a claim.
+         *
+         * It said 60 fps because that was the number the design aimed for and
+         * nobody checked, and it was wrong by half: the compositor managed 33.
+         * A boot screen that reports a capability it does not have is worse
+         * than one that says nothing, so it reports what it is doing.  The
+         * counter is filled in once a second by the frame loop, so the number
+         * shown is the number measured, not the number hoped for. */
+        {
+            char rate[40];
+            char digits[12];
+            int count = 0;
+            int at = 0;
+            uint32_t value = wm.fps;
+
+            if (value == 0U) {
+                value = 1U;  /* the first second has not completed yet */
+            }
+            while (value > 0U && count < 10) {
+                digits[count++] = (char)('0' + (value % 10U));
+                value /= 10U;
+            }
+            {
+                static const char prefix[] = "compositor ";
+                static const char suffix[] = " fps, measured";
+
+                while (prefix[at] != '\0') {
+                    rate[at] = prefix[at];
+                    at++;
+                }
+                while (count > 0) {
+                    rate[at++] = digits[--count];
+                }
+                while (suffix[at - 19] != '\0') {
+                    rate[at] = suffix[at - 19];
+                    at++;
+                }
+            }
+            rate[at] = '\0';
+            font_draw_centered(surface, x + width / 2, y + 222, rate,
+                               THEME_TEXT_TERTIARY, 1);
+        }
         font_draw_centered(surface, x + width / 2, y + 234,
                            "damage tracked", THEME_TEXT_TERTIARY, 1);
         break;
