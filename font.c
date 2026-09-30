@@ -175,6 +175,106 @@ int font_line_height(int scale)
  * The coverage is counted rather than sampled, so the result does not change
  * with where the glyph happens to land on the pixel grid: a stem is the same
  * weight in every column, which is what makes a row of text look even. */
+/* One destination pixel's coverage from a glyph, 0 to 255.
+ *
+ * Bilinear.  The destination pixel's centre is mapped back into source space
+ * and the four neighbours around it are weighted by how far it sits between
+ * them, so the result follows the glyph's shape rather than the pixel grid.
+ * Nearest neighbour, which is what this replaced, copies one source pixel into
+ * a scale by scale block: a stem one pixel wide becomes a staircase, and at
+ * 8x the underlying bitmap is visible as tiles.  That is the whole of what
+ * made the interface look like graph paper.
+ *
+ * Fixed point in 8.8 rather than floating point, because this runs per
+ * destination pixel over every glyph on the screen and there is no FPU here to
+ * do it with.  The vertical divisor is the destination extent, not the source
+ * height: getting that wrong makes the sample walk off the bottom of the glyph
+ * and every descender disappears, which is what the preview caught.
+ *
+ * At 1:1 the weights collapse to a single source pixel, so this is exactly the
+ * old behaviour with no smoothing -- sharp text at its native size, which is
+ * what a crisp bitmap font should be. */
+static unsigned glyph_coverage(uint8_t (*row)(int, int, void *), void *source,
+                               int dx, int dy, int dest_w, int dest_h)
+{
+    /* Centre of this destination pixel, mapped back into source space, in 8.8
+     * fixed point:  (destination + 0.5) * source_extent / destination_extent
+     * - 0.5.
+     *
+     * The half-pixel offset is why the weights are not symmetric at the very
+     * edge of a glyph: the first destination column has its centre half a
+     * destination pixel in, which lands it between source column -1 and 0, so
+     * it picks up a fraction of the one next door.  That is what rounds off a
+     * stem rather than leaving it square, and it is why the out of range case
+     * clamps instead of returning nothing.
+     *
+     * At 1:1 every position comes out as an exact integer with no fraction, so
+     * the weights collapse to the single source pixel and the result is exactly
+     * the old hard-edged glyph.  Two earlier forms of this were wrong in ways
+     * that only showed up when looked at: a flat -128 was right at one scale
+     * and not another, and shifting the destination position before dividing
+     * overflowed the product and put the sample several rows down the glyph. */
+    int sx = ((((2 * dx + 1) * FONT_GLYPH_WIDTH * 256) / (2 * dest_w)) - 128);
+    int sy = ((((2 * dy + 1) * FONT_GLYPH_HEIGHT * 256) / (2 * dest_h)) - 128);
+    int x0 = sx >> 8;
+    int y0 = sy >> 8;
+    int fx = sx & 0xFF;
+    int fy = sy & 0xFF;
+    int w00 = (256 - fx) * (256 - fy);
+    int w10 = fx * (256 - fy);
+    int w01 = (256 - fx) * fy;
+    int w11 = fx * fy;
+    /* Outside the glyph, treat the edge pixel as its own neighbour rather than
+     * dropping the sample.  The first and last destination columns of a glyph
+     * have their centres between the edge and the one next door, and returning
+     * nothing for them is what leaves a stem square at both ends while the
+     * middle of it is soft. */
+    int x1 = x0 + 1;
+    int y1 = y0 + 1;
+
+    if (x0 < 0) {
+        x0 = 0;
+    } else if (x0 >= FONT_GLYPH_WIDTH) {
+        x0 = FONT_GLYPH_WIDTH - 1;
+    }
+    if (y0 < 0) {
+        y0 = 0;
+    } else if (y0 >= FONT_GLYPH_HEIGHT) {
+        y0 = FONT_GLYPH_HEIGHT - 1;
+    }
+    if (x1 < 0) {
+        x1 = 0;
+    } else if (x1 >= FONT_GLYPH_WIDTH) {
+        x1 = FONT_GLYPH_WIDTH - 1;
+    }
+    if (y1 < 0) {
+        y1 = 0;
+    } else if (y1 >= FONT_GLYPH_HEIGHT) {
+        y1 = FONT_GLYPH_HEIGHT - 1;
+    }
+
+    /* Weights are unchanged by the clamp, so a sample sitting half outside the
+     * glyph keeps the fraction it had: the edge pixel contributes what share of
+     * it falls inside.  That is what rounds the stem off. */
+    {
+        unsigned total = (unsigned)((((row(y0, x0, source) & (1U << x0)) != 0U)
+                                     ? w00 : 0) +
+                                    (((row(y0, x1, source) & (1U << x1)) != 0U)
+                                     ? w10 : 0) +
+                                    (((row(y1, x0, source) & (1U << x0)) != 0U)
+                                     ? w01 : 0) +
+                                    (((row(y1, x1, source) & (1U << x1)) != 0U)
+                                     ? w11 : 0) +
+                                    128) >> 8;
+
+        /* Clamped neighbours can both be the same edge pixel, so the four
+         * weights can sum past 65536 and the result can come out at 256.  An
+         * alpha of 256 would be scaled by 256 and over-saturate whatever it is
+         * drawn over, so it is clamped here rather than trusted. */
+        return total > 255U ? 255U : total;
+    }
+}
+
 static void glyph_draw(struct gfx_surface *surface, int x, int top,
                        uint8_t (*row)(int, int, void *), void *source,
                        uint32_t color, int scale)
@@ -191,57 +291,33 @@ static void glyph_draw(struct gfx_surface *surface, int x, int top,
         right = (int)surface->width;
     }
     for (int py = top; py < top + height; ++py) {
-        int source_row = (py - top) / scale;
-        int empty;
+        int dy = py - top;
 
         if (py < 0) {
             continue;
         }
-        /* A row with no ink in it is skipped whole.  Worth the pass over the
-         * row: most rows of most glyphs are empty at the top and bottom, and
-         * this is the common case in a screen full of text. */
-        for (int column = 0; column < FONT_GLYPH_WIDTH; ++column) {
-            if ((row(source_row, column, source) & (1U << column)) == 0U) {
-                empty = 1;
-            } else {
-                empty = 0;
-                break;
-            }
-        }
-        if (empty) {
-            continue;
-        }
-        for (int column = 0; column < FONT_GLYPH_WIDTH; ++column) {
-            int on = (row(source_row, column, source) & (1U << column)) != 0U;
+        for (int dx = 0; dx < width; ++dx) {
+            int px = x + dx;
+            unsigned coverage;
 
-            for (int sub = 0; sub < scale; ++sub) {
-                int px = x + column * scale + sub;
-
-                if (px < left || px >= right || px < 0) {
-                    continue;
-                }
-                if (on) {
-                    surface->pixels[(uint32_t)py * surface->pitch_pixels +
-                                    (uint32_t)px] = color;
-                }
-                /* The pixels with no ink in them are left alone.
-                 *
-                 * They used to be blended towards the text colour, with the
-                 * row's total coverage as the alpha, on the theory that it
-                 * gave a horizontal stem a soft end.  It blended the whole
-                 * destination row rather than the ends, so every glyph with
-                 * any ink in a row got the text colour washed across the full
-                 * width of its cell: a light rectangle behind every character,
-                 * wherever text is drawn.  The terminal, the menu bar, the
-                 * dock and the window titles all go through here, which is why
-                 * it looked like a fault in all of them at once.
-                 *
-                 * At 1:1 there is nothing to soften anyway -- an 8x8 glyph
-                 * either has a pixel in a cell or it does not, and a half
-                 * covered pixel at 1:1 is a lighter pixel, not a smoother
-                 * edge.  So the ink is drawn and nothing else is touched, and
-                 * text is crisp against whatever is behind it. */
+            if (px < left || px >= right || px < 0) {
+                continue;
             }
+            coverage = glyph_coverage(row, source, dx, dy, width, height);
+            if (coverage == 0U) {
+                continue;
+            }
+            /* Blended, not written.
+             *
+             * Coverage is a number between 0 and 255 rather than a bit, so it
+             * has to be blended: writing the text colour outright would paint
+             * every destination pixel in the cell, including the ones with
+             * almost no ink, and put a solid rectangle behind every glyph.
+             * That was a bug here once and it is why the empty pixels were
+             * left alone instead -- which was right for a hard-edged bitmap
+             * and wrong for a filtered one, since a filtered glyph has no
+             * "empty" pixels left, only faint ones. */
+            gfx_blend_pixel(surface, px, py, color, coverage);
         }
     }
 }
