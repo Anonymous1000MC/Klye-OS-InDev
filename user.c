@@ -358,6 +358,26 @@ static void syscall_dispatch(struct interrupt_registers *regs, uint64_t number)
             put_hex(number);
             serial_putc('\n');
         }
+        /* What the frame actually holds for the four registers the canary
+         * says come back wrong.  Printed from the kernel rather than from the
+         * test program: put_hex already works here, and the test has to do
+         * this in assembly against a blob that gets copied, which is a poor
+         * place to be debugging.  The value at entry is the one the program
+         * set, so if it matches the canary's expected value the damage is
+         * happening on the way back out and not on the way in. */
+        if (number == 999U) {
+            serial_write("  frame rdi=");
+            put_hex(regs->rdi);
+            serial_write(" rsi=");
+            put_hex(regs->rsi);
+            serial_write(" rdx=");
+            put_hex(regs->rdx);
+            serial_write(" r8=");
+            put_hex(regs->r8);
+            serial_write(" rbx=");
+            put_hex(regs->rbx);
+            serial_putc('\n');
+        }
         regs->rax = (uint64_t)-38; /* ENOSYS */
         return;
     }
