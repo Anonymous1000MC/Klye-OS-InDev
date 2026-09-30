@@ -35,6 +35,8 @@ static uint64_t user_exit_code;
 #define SYS_MMAP      9
 #define SYS_BRK      12
 #define SYS_ARCH_PRCTL 158
+#define SYS_SET_TID_ADDRESS 218
+#define SYS_GETTID 186
 #define SYS_EXIT     60
 
 /* arch_prctl subcommands, and the one that matters here.
@@ -57,6 +59,13 @@ static uint64_t user_exit_code;
 /* The slot itself is defined in ring3.S, next to the other values the
  * transitions need, so there is one copy of it. */
 extern volatile uint64_t user_fs_base_slot;
+
+/* Where musl asked to have its thread id written.  Recorded, not honoured yet:
+ * the write itself needs a place to put the value that survives a context
+ * switch, which is the task structure, and that is a separate piece of work.
+ * Recording it means the tid the program reads is at least the right one. */
+static uint64_t user_tid_address;
+static uint64_t user_tid;
 #define user_fs_base user_fs_base_slot
 
 /* The program break, and the first address its heap may use.
@@ -327,6 +336,27 @@ static void syscall_dispatch(struct interrupt_registers *regs, uint64_t number)
         }
     case SYS_MMAP:
         user_do_mmap(regs);
+        return;
+    case SYS_SET_TID_ADDRESS:
+        /* musl calls this from __init_tp, during TLS setup, before main and
+         * with no threading involved.  It hands back the address the thread
+         * wants to be able to have its tid written to, and the kernel is
+         * supposed to return the calling thread's id.
+         *
+         * Nothing on the startup path looks at the answer, which is why a
+         * program reaches main even when this returns -ENOSYS -- and then
+         * stores -38 in its thread structure and uses that as a thread and
+         * signal identity for the rest of its life.  A silent wrong answer is
+         * worse than a missing one. */
+        user_tid_address = regs->rdi;
+        user_tid = (uint64_t)(scheduler_current_task() + 1);
+        regs->rax = user_tid;
+        return;
+    case SYS_GETTID:
+        /* Cheap, and it means the tid this kernel hands out is at least
+         * reachable: a program that asks twice gets the same answer, which is
+         * the property thread identity exists to provide. */
+        regs->rax = (uint64_t)(int64_t)(scheduler_current_task() + 1);
         return;
     case SYS_EXIT:
         user_exit_code = regs->rdi;
