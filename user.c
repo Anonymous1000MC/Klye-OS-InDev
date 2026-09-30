@@ -388,9 +388,11 @@ static void syscall_dispatch(struct interrupt_registers *regs, uint64_t number)
             regs->rax = (uint64_t)-14; /* EFAULT */
             return;
         }
-        while (written < count && text[written] != 0) {
+        /* Counted, not scanned, for the same reason as writev: a write is a
+         * length, and stopping at a NUL reports a short write for a request
+         * that in fact succeeded. */
+        for (written = 0U; written < count; ++written) {
             serial_putc(text[written]);
-            written++;
         }
         regs->rax = written;
         return;
@@ -518,20 +520,24 @@ static void syscall_dispatch(struct interrupt_registers *regs, uint64_t number)
             const char *text = (const char *)(uintptr_t)iov[i].iov_base;
             uint64_t length = iov[i].iov_len;
 
-            if (text == 0) {
+            if (text == 0 || length == 0U) {
                 continue;
             }
-            /* Checked against the length actually in the entry, not the
-             * count.  A length of all-ones would otherwise pass a pointer
-             * check and then be used as a loop bound. */
+            /* The bytes are counted, not scanned.  A writev is a length, not a
+             * string: stopping at the first NUL means writing less than the
+             * caller asked for and telling it so, and a C library that
+             * believes a short write is a retryable condition will retry with
+             * buffer state that no longer matches the file.  That is how one
+             * correct call turns into an unbounded loop of EFAULT.
+             *
+             * The one exception is the console, which is a terminal and not a
+             * byte sink -- there is nothing after a NUL to write, and counting
+             * a run of padding as written would be a different lie. */
             if (!user_pointer_ok(text, length)) {
                 regs->rax = (uint64_t)-14;
                 return;
             }
             for (uint64_t at = 0; at < length; ++at) {
-                if (text[at] == 0) {
-                    break;
-                }
                 serial_putc(text[at]);
                 total++;
             }
