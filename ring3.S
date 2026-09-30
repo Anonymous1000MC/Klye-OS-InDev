@@ -21,6 +21,27 @@
 .globl user_syscall_rip
 user_syscall_rip:
     .quad 0
+/* The sysretq return state with the ring 3 selectors already folded in: CS in
+ * bits 63:48, SS in 47:32, the flags in the low half.
+ *
+ * Built before the register pops, because there is no free register after
+ * them.  Every register except rsp belongs to the program at that point, and
+ * rax is specifically the syscall's return value.  Using it as scratch left a
+ * program reading 0x23001B00000202 where write(2) had returned 2; using rdi
+ * or rsi instead broke two registers the canary checks.  There is genuinely
+ * nowhere to put a temporary there, so it is built here while rax is still
+ * free and read back afterwards. */
+.globl user_syscall_return_state
+user_syscall_return_state:
+    .quad 0
+
+/* CS = 0x23 in bits 63:48, SS = 0x1B in 47:32.  In memory because orq has no
+ * 64-bit immediate form, and in .data because the slots around it are .bss. */
+.section .rodata
+user_syscall_selectors:
+    .quad 0x0023001B00000000
+.section .text
+
 .globl user_syscall_rflags
 user_syscall_rflags:
     .quad 0
@@ -258,6 +279,14 @@ syscall_in_kernel:
     shrq $32, %rdx
     wrmsr
 
+    /* The return state, built here because there is nowhere to build it
+     * afterwards.  See the note on user_syscall_return_state.  rax and rdx
+     * are both free at this point: the frame has not been popped, so the
+     * program's values are still on the stack and come back on the pops. */
+    movq user_syscall_rflags(%rip), %rax
+    orq user_syscall_selectors(%rip), %rax
+    movq %rax, user_syscall_return_state(%rip)
+
     popq %rax
     popq %rbx
     popq %rcx
@@ -349,7 +378,5 @@ syscall_return:
      * about to jump to, and overwriting it is how the return ended up at
      * 0x1B00000000 -- the stack selector executed as code, with no fault until
      * the fetch. */
-    movq $0x0023001B00000000, %rax
-    orq %r11, %rax
-    movq %rax, %r11
+    movq user_syscall_return_state(%rip), %r11
     sysretq
