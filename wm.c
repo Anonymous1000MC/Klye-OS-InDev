@@ -828,6 +828,18 @@ static void update_dock_animation(void)
 #define START_SETTINGS_ITEM (-300)
 #define START_WINDOW_BASE (-400)
 
+/* A launcher's icon, or a sane default when the field is not one of ours.
+ * The value is parsed from a file in rootfs and may be absent, negative, or
+ * larger than the list of applications. */
+static enum app_id launcher_icon(const struct launcher *entry)
+{
+    if (entry != 0 && entry->used && entry->icon >= 0 &&
+        entry->icon < (int)APP_COUNT) {
+        return (enum app_id)entry->icon;
+    }
+    return APP_TERMINAL;
+}
+
 static const char *wm_window_title(struct wm_window *window)
 {
     if (window == 0 || window->used == 0) {
@@ -895,8 +907,12 @@ static void draw_start_menu(struct gfx_surface *surface)
     x = THEME_TASKBAR_PAD;
     y = (int)gfx_height() - THEME_TASKBAR_HEIGHT - height;
 
+    /* peak_alpha is an opacity, not a colour.  It was passed as 0x90000000,
+     * which is a colour, and the shadow built from it wrote with an alpha of
+     * about two billion -- the rounding in gfx_rounded_rect_alpha overflowed it
+     * past 255 and out of the branch that was supposed to handle it. */
     gfx_rounded_shadow(surface, x, y, width, height, 8, 14, 4,
-                       0xFF000000U, 0x90000000U);
+                       0xFF000000U, 0x90U);
     gfx_rounded_border(surface, x, y, width, height, 8, 1,
                        THEME_TASKBAR_EDGE);
 
@@ -911,7 +927,10 @@ static void draw_start_menu(struct gfx_surface *surface)
             gfx_rounded_rect(surface, x + 4, row, width - 8, item_h, 5,
                              THEME_TASKBAR_BUTTON_HOVER);
         }
-        app_draw_icon(surface, (enum app_id)entry->icon, x + pad, row + 5, 20);
+        /* The icon field comes from a file and may not be one of ours.  A
+         * launcher with no icon gets the terminal's, which is at least a
+         * picture rather than nothing. */
+        app_draw_icon(surface, launcher_icon(entry), x + pad, row + 5, 20);
         font_draw(surface, x + pad + 28, row + item_h - 9, entry->title,
                   THEME_TASKBAR_BUTTON_TEXT, 1);
         row += item_h;

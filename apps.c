@@ -259,9 +259,25 @@ int app_from_name(const char *name)
 void app_draw_icon(struct gfx_surface *surface, enum app_id app, int x, int y,
                    int size)
 {
-    uint32_t accent = app_accent(app);
+    uint32_t accent;
     int radius = size / 4;
 
+    /* The app has to be one of ours.
+     *
+     * A launcher's icon field is parsed out of a file in rootfs and is only as
+     * trustworthy as that file: a missing Icon=, a negative number, or a name
+     * that is not a number all produce something outside the enum.  Passing one
+     * of those straight through indexed app_symbols and app_accent off the end
+     * of both, and the start menu took the kernel down with a fault at
+     * 0x80016EDB8 on the first click.
+     *
+     * Checked here rather than at each call site, because this is the one
+     * function that indexes those tables and every call site has the same
+     * mistake available to it. */
+    if ((int)app < 0 || (int)app >= (int)APP_COUNT) {
+        return;
+    }
+    accent = app_accent(app);
     if (size < 8) {
         return;
     }
