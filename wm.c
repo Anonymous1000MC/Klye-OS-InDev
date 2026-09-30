@@ -72,6 +72,7 @@ struct wm_window {
      * lose its place in the button row and move every other button, so closing
      * a window hides it and the row stays put. */
     unsigned int minimized;
+    unsigned int maximized;
 };
 
 #define DOCK_SLOT_APP 0
@@ -103,6 +104,19 @@ struct wm_state {
     uint8_t mouse_buttons;
     int press_x;
     int press_y;
+    /* Resize: which window, which edge, and the rectangle it started from. */
+    int resize_window;
+    int resize_edge;
+    int resize_start_x;
+    int resize_start_y;
+    int resize_origin_x;
+    int resize_origin_y;
+    int resize_origin_width;
+    int resize_origin_height;
+    /* Title bar double click.  Two presses close together on the title bar, and
+     * nowhere else, and neither of them on a button. */
+    uint32_t last_title_click;
+    int last_title_index;
     int drag_window;
     int drag_target;
     uint8_t dragging;
@@ -477,6 +491,8 @@ static void damage_rect(int x, int y, int width, int height)
 }
 
 static int start_menu_height(void);
+static void window_toggle_maximize(int index);
+static void window_snap_if_near_edge(struct wm_window *window);
 
 /* The bar and the open menu, which is taller than the bar. */
 static void damage_taskbar(void)
@@ -2265,27 +2281,11 @@ void wm_run_action(enum wm_action action)
         wm_minimize_focused();
         break;
     case WM_ACTION_ZOOM_WINDOW:
-        if (wm.focused >= 0) {
-            struct wm_window *window = &wm.windows[wm.focused];
-
-            if (window->width < (int)gfx_width() - 100) {
-                window->restore_x = window->x;
-                window->restore_y = window->y;
-                window->restore_width = window->width;
-                window->restore_height = window->height;
-                window->x = 40;
-                window->y = desktop_top() + 16;
-                window->width = (int)gfx_width() - 80;
-                window->height = (int)gfx_height() - desktop_top() - 110;
-            } else {
-                window->x = window->restore_x;
-                window->y = window->restore_y;
-                window->width = window->restore_width;
-                window->height = window->restore_height;
-            }
-            window->content_dirty = 1;
-            mark_chrome_dirty();
-        }
+        /* Fill the screen and restore to where it was.  This used to shrink the
+         * window to eighty percent and call that zooming, which is not what
+         * the word means and left a maximized window with the desktop showing
+         * around it. */
+        window_toggle_maximize(wm.focused);
         break;
     case WM_ACTION_TOGGLE_DOCK:
         wm_toggle_dock();
@@ -2650,6 +2650,304 @@ static void handle_taskbar_click(void)
     }
 }
 
+/* Which edge or corner of a window the pointer is over.
+ *
+ * The grab zone is wider than the drawn border, because a one pixel border is
+ * a one pixel target and nobody aims that well with a mouse.  Six zones: four
+ * edges and four corners folded into the corner cases, which are checked first
+ * so a corner wins over the edge it overlaps.
+ */
+#define RESIZE_GRAB 6
+
+enum wm_resize_edge {
+    RESIZE_NONE = 0,
+    RESIZE_LEFT,
+    RESIZE_RIGHT,
+    RESIZE_TOP,
+    RESIZE_BOTTOM,
+    RESIZE_TOP_LEFT,
+    RESIZE_TOP_RIGHT,
+    RESIZE_BOTTOM_LEFT,
+    RESIZE_BOTTOM_RIGHT
+};
+
+static int window_resize_edge_at(struct wm_window *window, int x, int y)
+{
+    int left = window->x;
+    int right = window->x + window->width;
+    int top = window->y;
+    int bottom = window->y + window->height;
+    int near_left = x >= left - RESIZE_GRAB && x < left + RESIZE_GRAB;
+    int near_right = x >= right - RESIZE_GRAB && x < right + RESIZE_GRAB;
+    int near_top = y >= top - RESIZE_GRAB && y < top + RESIZE_GRAB;
+    int near_bottom = y >= bottom - RESIZE_GRAB && y < bottom + RESIZE_GRAB;
+    bool inside_x = x >= left - RESIZE_GRAB && x < right + RESIZE_GRAB;
+    bool inside_y = y >= top - RESIZE_GRAB && y < bottom + RESIZE_GRAB;
+
+    if (!inside_x || !inside_y) {
+        return RESIZE_NONE;
+    }
+    if (near_top && near_left) {
+        return RESIZE_TOP_LEFT;
+    }
+    if (near_top && near_right) {
+        return RESIZE_TOP_RIGHT;
+    }
+    if (near_bottom && near_left) {
+        return RESIZE_BOTTOM_LEFT;
+    }
+    if (near_bottom && near_right) {
+        return RESIZE_BOTTOM_RIGHT;
+    }
+    if (near_left) {
+        return RESIZE_LEFT;
+    }
+    if (near_right) {
+        return RESIZE_RIGHT;
+    }
+    if (near_top) {
+        return RESIZE_TOP;
+    }
+    if (near_bottom) {
+        return RESIZE_BOTTOM;
+    }
+    return RESIZE_NONE;
+}
+
+/* Windows have a minimum.  A terminal with four columns is not usable and one
+ * with none has a divide by zero somewhere inside the library, so the drag
+ * stops here rather than letting the pointer make it smaller. */
+#define WINDOW_MIN_WIDTH 240
+#define WINDOW_MIN_HEIGHT 120
+
+/* Snap a window to a screen edge when it is dropped near one.
+ *
+ * The test is on the drop, not during the drag: snapping while a window is
+ * moving means it jumps around under the pointer and the pointer and the
+ * window disagree about where the pointer is.  Snapping on release means the
+ * window goes where it was let go, which is what was meant.
+ *
+ * Half the window has to overhang the edge for it to count, so a window that
+ * happens to pass near the left side of the screen while being dragged past it
+ * does not jump.
+ */
+#define SNAP_MARGIN 16
+
+static void window_snap_if_near_edge(struct wm_window *window)
+{
+    int width = (int)gfx_width();
+    int height = (int)gfx_height() - THEME_TASKBAR_HEIGHT;
+    int over = window->width / 2;
+
+    if (window->x <= 0) {
+        window->x = 0;
+        return;
+    }
+    if (window->x + window->width >= width) {
+        window->x = width - window->width;
+        return;
+    }
+    if (window->x < SNAP_MARGIN) {
+        window->x = 0;
+        return;
+    }
+    if (window->x > width - SNAP_MARGIN - over) {
+        window->x = width - window->width;
+        return;
+    }
+    if (window->y <= 0) {
+        window->y = 0;
+        return;
+    }
+    if (window->y + window->height >= height) {
+        window->y = height - window->height;
+        return;
+    }
+    if (window->y < SNAP_MARGIN) {
+        window->y = 0;
+        return;
+    }
+    if (window->y > height - SNAP_MARGIN - window->height / 2) {
+        window->y = height - window->height;
+    }
+}
+
+/* Maximize and restore.
+ *
+ * The unmaximized rectangle is kept rather than recomputed, so restoring puts
+ * a window back where it was rather than where a guess puts it.  The button in
+ * the title bar and a double click on the title bar both come here.
+ */
+static void window_toggle_maximize(int index)
+{
+    struct wm_window *window;
+
+    if (index < 0 || index >= WM_WINDOW_LIMIT) {
+        return;
+    }
+    window = &wm.windows[index];
+    if (window->used == 0) {
+        return;
+    }
+    damage_rect(window->x - THEME_WINDOW_SHADOW_SPREAD,
+                window->y - THEME_WINDOW_SHADOW_SPREAD,
+                window->width + THEME_WINDOW_SHADOW_SPREAD * 2,
+                window->height + THEME_WINDOW_SHADOW_SPREAD * 2);
+    if (window->maximized != 0U) {
+        window->x = window->restore_x;
+        window->y = window->restore_y;
+        window->width = window->restore_width;
+        window->height = window->restore_height;
+        window->maximized = 0U;
+    } else {
+        window->restore_x = window->x;
+        window->restore_y = window->y;
+        window->restore_width = window->width;
+        window->restore_height = window->height;
+        window->x = 0;
+        window->y = 0;
+        window->width = (int)gfx_width();
+        window->height = (int)gfx_height() - THEME_TASKBAR_HEIGHT;
+        window->maximized = 1U;
+    }
+    window->content_dirty = 1U;
+    damage_rect(window->x - THEME_WINDOW_SHADOW_SPREAD,
+                window->y - THEME_WINDOW_SHADOW_SPREAD,
+                window->width + THEME_WINDOW_SHADOW_SPREAD * 2,
+                window->height + THEME_WINDOW_SHADOW_SPREAD * 2);
+    mark_chrome_dirty();
+}
+
+static void window_begin_resize(int index, int edge)
+{
+    wm.resize_window = index;
+    wm.resize_edge = edge;
+    wm.dragging = 0U;
+    wm.resize_start_x = wm.mouse_x;
+    wm.resize_start_y = wm.mouse_y;
+    wm.resize_origin_x = wm.windows[index].x;
+    wm.resize_origin_y = wm.windows[index].y;
+    wm.resize_origin_width = wm.windows[index].width;
+    wm.resize_origin_height = wm.windows[index].height;
+    focus_window(index);
+}
+
+static void window_update_resize(void)
+{
+    struct wm_window *window = 0;
+    int dx = wm.mouse_x - wm.resize_start_x;
+    int dy = wm.mouse_y - wm.resize_start_y;
+    int x = wm.resize_origin_x;
+    int y = wm.resize_origin_y;
+    int width = wm.resize_origin_width;
+    int height = wm.resize_origin_height;
+    int old_x = window->x;
+    int old_y = window->y;
+    int old_width = window->width;
+    int old_height = window->height;
+
+    if (wm.resize_window < 0 || wm.resize_window >= WM_WINDOW_LIMIT) {
+        wm.resize_window = -1;
+        return;
+    }
+    window = &wm.windows[wm.resize_window];
+    if (window->used == 0) {
+        wm.resize_window = -1;
+        return;
+    }
+    switch (wm.resize_edge) {
+    case RESIZE_LEFT:
+        width = wm.resize_origin_width - dx;
+        x = wm.resize_origin_x + dx;
+        break;
+    case RESIZE_RIGHT:
+        width = wm.resize_origin_width + dx;
+        break;
+    case RESIZE_TOP:
+        height = wm.resize_origin_height - dy;
+        y = wm.resize_origin_y + dy;
+        break;
+    case RESIZE_BOTTOM:
+        height = wm.resize_origin_height + dy;
+        break;
+    case RESIZE_TOP_LEFT:
+        width = wm.resize_origin_width - dx;
+        height = wm.resize_origin_height - dy;
+        x = wm.resize_origin_x + dx;
+        y = wm.resize_origin_y + dy;
+        break;
+    case RESIZE_TOP_RIGHT:
+        width = wm.resize_origin_width + dx;
+        height = wm.resize_origin_height - dy;
+        y = wm.resize_origin_y + dy;
+        break;
+    case RESIZE_BOTTOM_LEFT:
+        width = wm.resize_origin_width - dx;
+        height = wm.resize_origin_height + dy;
+        x = wm.resize_origin_x + dx;
+        break;
+    case RESIZE_BOTTOM_RIGHT:
+        width = wm.resize_origin_width + dx;
+        height = wm.resize_origin_height + dy;
+        break;
+    default:
+        wm.resize_window = -1;
+        return;
+    }
+    /* Dragging a left or top edge past the minimum moves the edge rather than
+     * the origin, so the window stays where its title bar is. */
+    if (width < WINDOW_MIN_WIDTH) {
+        if (wm.resize_edge == RESIZE_LEFT ||
+            wm.resize_edge == RESIZE_TOP_LEFT ||
+            wm.resize_edge == RESIZE_BOTTOM_LEFT) {
+            x = wm.resize_origin_x + wm.resize_origin_width - WINDOW_MIN_WIDTH;
+        }
+        width = WINDOW_MIN_WIDTH;
+    }
+    if (height < WINDOW_MIN_HEIGHT) {
+        if (wm.resize_edge == RESIZE_TOP || wm.resize_edge == RESIZE_TOP_LEFT ||
+            wm.resize_edge == RESIZE_TOP_RIGHT) {
+            y = wm.resize_origin_y + wm.resize_origin_height - WINDOW_MIN_HEIGHT;
+        }
+        height = WINDOW_MIN_HEIGHT;
+    }
+    if (x == old_x && y == old_y && width == old_width && height == old_height) {
+        return;
+    }
+    /* Both the old and the new rectangle have to be repainted: a wider window
+     * leaves pixels behind it and a taller one has to grow downward into what
+     * was under it. */
+    damage_rect(old_x - THEME_WINDOW_SHADOW_SPREAD,
+                old_y - THEME_WINDOW_SHADOW_SPREAD,
+                old_width + THEME_WINDOW_SHADOW_SPREAD * 2,
+                old_height + THEME_WINDOW_SHADOW_SPREAD * 2);
+    damage_rect(x - THEME_WINDOW_SHADOW_SPREAD, y - THEME_WINDOW_SHADOW_SPREAD,
+                width + THEME_WINDOW_SHADOW_SPREAD * 2,
+                height + THEME_WINDOW_SHADOW_SPREAD * 2);
+    window->x = x;
+    window->y = y;
+    window->width = width;
+    window->height = height;
+    window->content_dirty = 1U;
+}
+
+static void window_end_resize(void)
+{
+    struct wm_window *window;
+
+    if (wm.resize_window >= 0 && wm.resize_window < WM_WINDOW_LIMIT) {
+        window = &wm.windows[wm.resize_window];
+        if (window->used != 0) {
+            window->restore_x = window->x;
+            window->restore_y = window->y;
+            window->restore_width = window->width;
+            window->restore_height = window->height;
+        }
+    }
+    wm.resize_window = -1;
+    wm.resize_edge = RESIZE_NONE;
+}
+
 static void handle_mouse_press(void)
 {
     int x = wm.press_x;
@@ -2708,7 +3006,15 @@ static void handle_mouse_press(void)
     if (index >= 0) {
         struct wm_window *window = &wm.windows[index];
         int traffic_y = window->y + THEME_TITLEBAR_HEIGHT / 2;
+        int edge = window_resize_edge_at(window, x, y);
 
+        /* Edges before everything else.  The grab zone overlaps the title bar
+         * at the top corners, and a press there is a resize rather than a
+         * drag: nobody means to move a window by grabbing its corner. */
+        if (edge != RESIZE_NONE) {
+            window_begin_resize(index, edge);
+            return;
+        }
         if (y < window->y + THEME_TITLEBAR_HEIGHT) {
             if (x >= window->x + 6 && x < window->x + 26) {
                 focus_window(index);
@@ -2726,7 +3032,23 @@ static void handle_mouse_press(void)
                 return;
             }
             if (y >= traffic_y - 10 && y < traffic_y + 10) {
+                uint32_t now = pit_ticks();
+
                 focus_window(index);
+                /* Within one and a quarter seconds of the last one, on the
+                 * same window.  Half a second was too tight in practice: a
+                 * person double clicking does it faster, but a click and then
+                 * a deliberate second click half a beat later reads as two
+                 * separate wishes and the window never maximises. */
+                if (wm.last_title_index == index &&
+                    now - wm.last_title_click < 1250U) {
+                    wm.last_title_click = 0U;
+                    wm.last_title_index = -1;
+                    window_toggle_maximize(index);
+                } else {
+                    wm.last_title_click = now;
+                    wm.last_title_index = index;
+                }
                 return;
             }
             focus_window(index);
@@ -2912,7 +3234,13 @@ static void process_mouse(const struct mouse_event *event)
             handle_mouse_press();
         }
     }
-    if (wm.dragging != 0U && wm.drag_window >= 0 &&
+    if (wm.resize_window >= 0) {
+        if ((wm.mouse_buttons & MOUSE_BUTTON_LEFT) == 0U) {
+            window_end_resize();
+        } else {
+            window_update_resize();
+        }
+    } else if (wm.dragging != 0U && wm.drag_window >= 0 &&
         (event->buttons & MOUSE_BUTTON_LEFT) != 0U) {
         struct wm_window *window = &wm.windows[wm.drag_window];
 
@@ -2932,6 +3260,18 @@ static void process_mouse(const struct mouse_event *event)
         mark_chrome_dirty();
     }
     if (released && (event->buttons & MOUSE_BUTTON_LEFT) == 0U) {
+        if (wm.drag_window >= 0 && wm.drag_window < WM_WINDOW_LIMIT) {
+            struct wm_window *dragged = &wm.windows[wm.drag_window];
+
+            if (dragged->used != 0) {
+                window_snap_if_near_edge(dragged);
+                damage_rect(dragged->x - THEME_WINDOW_SHADOW_SPREAD,
+                            dragged->y - THEME_WINDOW_SHADOW_SPREAD,
+                            dragged->width + THEME_WINDOW_SHADOW_SPREAD * 2,
+                            dragged->height + THEME_WINDOW_SHADOW_SPREAD * 2);
+                dragged->content_dirty = 1U;
+            }
+        }
         wm.dragging = 0U;
         wm.drag_window = -1;
         mark_chrome_dirty();
@@ -2991,6 +3331,11 @@ static void refresh_chrome(void)
     wm.damage_rect_count = 0;
     wm.chrome_dirty = 1U;
     wm.mouse_buttons = 0;
+    /* No resize in progress.  Left at zero this would make the first mouse
+     * move resize window zero, because the frame loop would believe a resize
+     * was already under way. */
+    wm.resize_window = -1;
+    wm.resize_edge = RESIZE_NONE;
     wm.press_x = 0;
     wm.press_y = 0;
     wm.last_frame_q16 = pit_ticks() * 65536ULL;
