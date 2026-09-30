@@ -117,6 +117,29 @@ The heap now sits below the stack, in the gap between the image and the stack
 bottom.  This did not fix the return values, so the overlap was real and the
 cause was not -- both were true.
 
+**Narrowed much further, and the lead is now specific.** A program using a bare
+inline `syscall` instruction -- no libc, no wrapper -- still reads a wrong
+return value, so it is not musl's write(). A plain store to a fixed address
+survives a syscall, and the same fixed address still holds its value after one,
+so the stack and the stores are both fine: only the returned value is wrong.
+
+The register canary now checks rax and passes, but the canary is a different
+program from the failing ones.  Re-running the canary's own test *inside a
+spawned ELF* fails: rax after syscall 999 is neither -38 nor -1.
+
+The frame dump from that run is the clue worth carrying:
+
+    TRACE rax=3e7 rdi=1 rsi=10000015d18 rdx=10000015d28 r10=10000000040
+
+r10 is 0x10000000040, which is a *kernel* address -- and it is the address of
+user_fs_base_slot itself.  The program never put that in r10, and it is wrong on
+the first syscall, not just the failing one.  The frame the C dispatcher is
+reading has a kernel value where the program's r10 should be, while rdi, rsi
+and rdx are the program's own.  So the damage is to specific slots of the
+saved frame, not to the return path as a whole, and the wrmsr that reads
+user_fs_base_slot on every syscall is the thing to suspect next: it uses rax
+and rdx as scratch immediately before the frame is popped.
+
 **Still not diagnosed, and the lead worth having:** the register canary never
 checks `rax`.  It is the one register a syscall is allowed to change and the
 only one that carries data, and every test so far has relied on some other
