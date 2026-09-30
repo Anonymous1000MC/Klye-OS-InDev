@@ -68,6 +68,10 @@ struct wm_window {
     int drag_offset_y;
     int content_dirty;
     int z;
+    /* Hidden but still in the taskbar.  A window that is merely closed would
+     * lose its place in the button row and move every other button, so closing
+     * a window hides it and the row stays put. */
+    unsigned int minimized;
 };
 
 #define DOCK_SLOT_APP 0
@@ -108,6 +112,14 @@ struct wm_state {
     int dock_origin_x;
     int dock_width;
     int dock_y;
+    /* Which taskbar item the pointer is over, or TASKBAR_NONE. */
+    int taskbar_hover;
+    /* Is the start menu open, and what is the pointer over inside it. */
+    bool start_open;
+    int start_hover;
+    /* The clock, formatted once a second rather than redrawn. */
+    char clock_text[16];
+    uint32_t clock_updated;
     struct dock_slot slots[APP_COUNT + LAUNCHER_MAX + 4];
     int slot_count;
     uint64_t last_frame_q16;
@@ -436,6 +448,7 @@ static void mark_chrome_dirty(void)
  * the content.  Anything that cannot say, falls back to the whole window,
  * which is what this always did.
  */
+
 static void damage_window(int index)
 {
     struct wm_window *window = &wm.windows[index];
@@ -463,6 +476,19 @@ static void damage_rect(int x, int y, int width, int height)
     gfx_damage(x, y, width, height);
 }
 
+static int start_menu_height(void);
+
+/* The bar and the open menu, which is taller than the bar. */
+static void damage_taskbar(void)
+{
+    int height = THEME_TASKBAR_HEIGHT;
+
+    if (wm.start_open) {
+        height += start_menu_height();
+    }
+    damage_rect(0, (int)gfx_height() - height, (int)gfx_width(), height);
+}
+
 static int menubar_height(void)
 {
     return THEME_MENUBAR_HEIGHT;
@@ -470,7 +496,9 @@ static int menubar_height(void)
 
 static int desktop_top(void)
 {
-    return menubar_height();
+    /* Nothing above the desktop any more: the menubar is gone, so icons start
+     * at the top of the screen with room for the first one. */
+    return THEME_TASKBAR_PAD + 8;
 }
 
 static int dock_box_height(void)
@@ -593,94 +621,6 @@ static void draw_desktop_icons(struct gfx_surface *surface)
     }
 }
 
-static void draw_menubar(struct gfx_surface *surface)
-{
-    int height = menubar_height();
-    char clock[24];
-    int clock_width;
-    int offset;
-
-    /* Blended, not filled.  The bar sits over the wallpaper, so an opaque fill
-     * paints out a third of the picture in one strip.  The alpha is high enough
-     * to keep the text legible over a busy background and low enough that the
-     * picture is still visibly there behind it. */
-    gfx_blend_rect(surface, 0, 0, (int)gfx_width(), height,
-                   THEME_MENUBAR_FILL, 232U);
-    gfx_fill(surface, 0, 0, (int)gfx_width(), 1, THEME_MENUBAR_EDGE);
-    gfx_fill(surface, 0, height - 1, (int)gfx_width(), 1,
-             PIXEL_RGB(0x00, 0x00, 0x00));
-
-    for (int menu = 0; menu < MENU_TOTAL; ++menu) {
-        int x = menu_title_x(menu);
-        int width = font_text_width(menus[menu].title, 1);
-        int selected = wm.active_menu == menu;
-
-        if (menu == MENU_APPLE) {
-            gfx_circle(surface, x + 7, height / 2, 6, THEME_TEXT_ON_DARK);
-            gfx_fill(surface, x + 4, height / 2 - 6, 2, 3, THEME_TEXT_ON_DARK);
-            gfx_fill(surface, x + 9, height / 2 - 7, 2, 4, THEME_TEXT_ON_DARK);
-            width = MENU_APPLE_WIDTH;
-            if (selected) {
-                gfx_rounded_rect(surface, x - 6, 4, width + 12, height - 8, 5,
-                                 THEME_MENUBAR_SELECT);
-            }
-            if (wm.active_menu == MENU_APPLE) {
-                gfx_circle(surface, x + 7, height / 2, 6, THEME_ACCENT_DEEP);
-            }
-            continue;
-        }
-        if (selected) {
-            gfx_rounded_rect(surface, x - 6, 4, width + 12, height - 8, 5,
-                             THEME_MENUBAR_SELECT);
-        }
-        font_draw(surface, x, height - 9, menus[menu].title,
-                  selected ? THEME_ACCENT : THEME_TEXT_ON_DARK, 1);
-    }
-
-    {
-        uint64_t seconds = pit_ticks() / 1000U;
-        uint32_t hours = (uint32_t)(seconds / 3600U) % 24U;
-        uint32_t minutes = (uint32_t)(seconds / 60U) % 60U;
-        static const char *const days[] = {
-            "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"
-        };
-        static const char *const months[] = {
-            "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
-        };
-        uint32_t day_index = (uint32_t)(seconds / 86400U) + 4U;
-        int position = 0;
-
-        clock[position++] = days[day_index % 7U][0];
-        clock[position++] = days[day_index % 7U][1];
-        clock[position++] = days[day_index % 7U][2];
-        clock[position++] = ' ';
-        clock[position++] = ' ';
-        clock[position++] = months[day_index % 12U][0];
-        clock[position++] = months[day_index % 12U][1];
-        clock[position++] = months[day_index % 12U][2];
-        clock[position++] = ' ';
-        clock[position++] = (char)('0' + (days[day_index % 7U][0] == 'S' &&
-                                         days[day_index % 7U][1] == 'a'
-                                             ? 26
-                                             : 1));
-        clock[position++] = ' ';
-        clock[position++] = (char)('0' + hours / 10U);
-        clock[position++] = (char)('0' + hours % 10U);
-        clock[position++] = ':';
-        clock[position++] = (char)('0' + minutes / 10U);
-        clock[position++] = (char)('0' + minutes % 10U);
-        clock[position] = '\0';
-        clock_width = font_text_width(clock, 1);
-        offset = (int)gfx_width() - THEME_MENU_ITEM_PAD - clock_width;
-        font_draw(surface, offset, height - 9, clock, THEME_TEXT_PRIMARY, 1);
-        gfx_rounded_border(surface, offset - 14, height / 2 - 6, 8, 12, 2, 1,
-                           THEME_TEXT_SECONDARY);
-        gfx_fill(surface, offset - 12, height / 2 - 4, 4, 8, THEME_TEXT_SECONDARY);
-        font_draw_right(surface, offset - 22, height - 9, "100%",
-                        THEME_TEXT_PRIMARY, 1);
-    }
-}
 
 static void draw_menu_panel(struct gfx_surface *surface)
 {
@@ -864,96 +804,282 @@ static void update_dock_animation(void)
     }
 }
 
-static void draw_launcher_icon(struct gfx_surface *surface,
-                               const struct launcher *item, int x, int y,
-                               int size)
-{
-    int radius = size / 5;
-    char initial[2];
 
-    gfx_rounded_rect(surface, x, y, size, size, radius,
-                     PIXEL_RGB(0x2C, 0x36, 0x4C));
-    gfx_rounded_border(surface, x, y, size, size, radius, 1,
-                       PIXEL_RGB(0x4A, 0x57, 0x73));
-    if (item == 0) {
-        return;
+/* The taskbar.
+ *
+ * One opaque bar along the bottom: a launcher button at the left, a button per
+ * running window in the middle, and the clock at the right.  Clicking a window
+ * button raises or lowers it, which is the same as clicking its title bar, and
+ * that is the whole point of the row.
+ *
+ * This replaces a menubar along the top and a dock along the bottom, which put
+ * the launcher in one corner and the clock in the opposite one and spent a
+ * translucent strip on every screen to do it.  A desktop with windows in it
+ * should say what is running, somewhere fixed, without being asked. */
+/* Which taskbar item is under the pointer, as one number so hover and click
+ * agree on what they are pointing at.  The window buttons start above
+ * TASKBAR_LAUNCHER's range so a window index cannot be mistaken for the
+ * launcher. */
+#define TASKBAR_NONE (-1)
+#define TASKBAR_LAUNCHER (-2)
+#define TASKBAR_WINDOW_BASE (-100)
+
+#define START_ITEM_BASE (-200)
+#define START_SETTINGS_ITEM (-300)
+#define START_WINDOW_BASE (-400)
+
+static const char *wm_window_title(struct wm_window *window)
+{
+    if (window == 0 || window->used == 0) {
+        return "Window";
     }
-    if (item->icon >= 0) {
-        app_draw_icon(surface, (enum app_id)item->icon, x, y, size);
-        return;
+    if (window->title[0] != '\0') {
+        return window->title;
     }
-    initial[0] = item->title[0] != 0 ? item->title[0] : '?';
-    initial[1] = 0;
-    font_draw_centered(surface, x + size / 2, y + size / 2 + 6, initial,
-                       THEME_TEXT_PRIMARY, 2);
+    return app_name((enum app_id)window->app);
 }
 
-static void draw_dock(struct gfx_surface *surface)
+/* The start menu.
+ *
+ * Opens upward from the launcher button, as it does on a desktop that has one:
+ * the list appears above the thing that opens it, so the button never moves and
+ * the pointer stays where it was.  Pinned items are the applications, then
+ * Settings, then the windows that are open, so the two things a person opens
+ * most -- an application, or a window they already have -- are both one click.
+ *
+ * This is the launcher's replacement and it lives in the taskbar, not in a
+ * separate strip.  The dock was a permanent strip on every screen for something
+ * that is almost always not being used.
+ */
+/* One place that knows how tall the menu is, because the draw and the
+ * hit-test have to agree or the last item cannot be clicked. */
+static int start_menu_height(void)
 {
+    int item_h = 30;
+    int pad = 8;
+    int window_items = 0;
     int height;
-    int y;
 
-    if (!wm.dock_visible || wm.dock_width <= 0) {
-        return;
+    for (int index = 0; index < WM_WINDOW_LIMIT; ++index) {
+        if (wm.windows[index].used != 0) {
+            window_items++;
+        }
     }
-    height = dock_box_height();
-    y = wm.dock_y;
+    height = pad * 2 + (launcher_count() + 1) * item_h;
+    if (window_items > 0) {
+        height += 8 + window_items * item_h;
+    }
+    return height;
+}
 
-    /* Blended for the same reason as the menu bar: the dock floats over the
-     * wallpaper and an opaque fill would hide whatever is behind it. */
-    gfx_rounded_rect_alpha(surface, wm.dock_origin_x, y, wm.dock_width, height,
-                           THEME_DOCK_RADIUS, THEME_DOCK_FILL, 236U);
-    gfx_rounded_border(surface, wm.dock_origin_x, y, wm.dock_width, height,
-                       THEME_DOCK_RADIUS, 1, THEME_DOCK_BORDER);
+static void draw_start_menu(struct gfx_surface *surface)
+{
+    int item_h = 30;
+    int pad = 8;
+    int width = 250;
+    int entries = launcher_count();
+    int window_items = 0;
+    int height = start_menu_height();
+    int x;
+    int y;
+    int row;
 
-    for (int index = 0; index < wm.slot_count; ++index) {
-        struct dock_slot *slot = &wm.slots[index];
-        int size = slot->width;
-        int top = y + (height - size) / 2;
+    for (int index = 0; index < WM_WINDOW_LIMIT; ++index) {
+        if (wm.windows[index].used != 0) {
+            window_items++;
+        }
+    }
+    if (height > (int)gfx_height() - THEME_TASKBAR_HEIGHT - 8) {
+        height = (int)gfx_height() - THEME_TASKBAR_HEIGHT - 8;
+    }
+    x = THEME_TASKBAR_PAD;
+    y = (int)gfx_height() - THEME_TASKBAR_HEIGHT - height;
 
-        if (slot->kind == DOCK_SLOT_SEPARATOR) {
-            gfx_fill(surface, slot->x + slot->width / 2 - 1, y + 8, 2,
-                     height - 16, THEME_DOCK_BORDER);
+    gfx_rounded_shadow(surface, x, y, width, height, 8, 14, 4,
+                       0xFF000000U, 0x90000000U);
+    gfx_rounded_border(surface, x, y, width, height, 8, 1,
+                       THEME_TASKBAR_EDGE);
+
+    row = y + pad;
+    for (int index = 0; index < entries; ++index) {
+        const struct launcher *entry = launcher_at(index);
+
+        if (!entry->used) {
             continue;
         }
-        if (slot->kind == DOCK_SLOT_LAUNCHER) {
-            const struct launcher *item = launcher_at(slot->launcher);
-            const char *label = item != 0 ? item->title : "?";
+        if (wm.start_hover == START_ITEM_BASE + index) {
+            gfx_rounded_rect(surface, x + 4, row, width - 8, item_h, 5,
+                             THEME_TASKBAR_BUTTON_HOVER);
+        }
+        app_draw_icon(surface, (enum app_id)entry->icon, x + pad, row + 5, 20);
+        font_draw(surface, x + pad + 28, row + item_h - 9, entry->title,
+                  THEME_TASKBAR_BUTTON_TEXT, 1);
+        row += item_h;
+    }
 
-            draw_launcher_icon(surface, item, slot->x, top, size);
-            if (wm.dock_hover == slot->index) {
-                int label_width = font_text_width(label, 1);
-                int label_x = slot->x + size / 2 - label_width / 2;
-                int label_y = y - 26;
+    /* Settings, always last of the pinned items so it is a deliberate trip
+     * rather than something in the way. */
+    if (wm.start_hover == START_SETTINGS_ITEM) {
+        gfx_rounded_rect(surface, x + 4, row, width - 8, item_h, 5,
+                         THEME_TASKBAR_BUTTON_HOVER);
+    }
+    app_draw_icon(surface, APP_SETTINGS, x + pad, row + 5, 20);
+    font_draw(surface, x + pad + 28, row + item_h - 9, "Settings",
+              THEME_TASKBAR_BUTTON_TEXT, 1);
+    row += item_h;
 
-                gfx_rounded_rect(surface, label_x - 9, label_y - 9,
-                                 label_width + 18, 18, 8,
-                                 PIXEL_RGB(0x1B, 0x22, 0x33));
-                font_draw_centered(surface, slot->x + size / 2, label_y + 4,
-                                   label, THEME_TEXT_ON_DARK, 1);
+    if (window_items > 0) {
+        /* A rule, then the open windows.  The label says how many, because a
+         * list of windows with no heading is a second launcher and reads as
+         * noise. */
+        gfx_fill(surface, x + pad, row + 3, width - pad * 2, 1,
+                 THEME_TASKBAR_EDGE);
+        row += 8;
+        for (int index = 0; index < WM_WINDOW_LIMIT; ++index) {
+            struct wm_window *window = &wm.windows[index];
+            const char *label;
+
+            if (window->used == 0) {
+                continue;
             }
-            continue;
-        }
-        app_draw_icon(surface, (enum app_id)slot->app, slot->x, top, size);
-        if (wm.dock_hover == slot->index) {
-            int label_width = font_text_width(app_title((enum app_id)slot->app),
-                                              1);
-            int label_x = slot->x + size / 2 - label_width / 2;
-            int label_y = y - 26;
-
-            gfx_rounded_rect(surface, label_x - 9, label_y - 9,
-                             label_width + 18, 18, 8,
-                             PIXEL_RGB(0x1B, 0x22, 0x33));
-            font_draw_centered(surface, slot->x + size / 2, label_y + 4,
-                               app_title((enum app_id)slot->app),
-                               THEME_TEXT_ON_DARK, 1);
-        }
-        if (app_is_open((enum app_id)slot->app)) {
-            gfx_fill(surface, slot->x + size / 2 - 2, y + height - 5, 4, 3,
-                     THEME_TEXT_SECONDARY);
+            label = wm_window_title(window);
+            if (wm.start_hover == START_WINDOW_BASE + index) {
+                gfx_rounded_rect(surface, x + 4, row, width - 8, item_h, 5,
+                                 THEME_TASKBAR_BUTTON_HOVER);
+            }
+            app_draw_icon(surface, (enum app_id)window->app, x + pad, row + 5,
+                          20);
+            font_draw(surface, x + pad + 28, row + item_h - 9, label,
+                      THEME_TASKBAR_BUTTON_TEXT, 1);
+            row += item_h;
         }
     }
 }
+
+/* Updated once a second by the frame loop rather than formatted during the
+ * draw, so the taskbar does not rebuild the string for every damaged pixel of
+ * it.  It was formatted inside the menubar draw, which meant every repaint of
+ * the clock's row reformatted it. */
+static void update_taskbar_clock(void)
+{
+    uint64_t seconds = pit_ticks() / 1000U;
+    uint32_t hours = (uint32_t)(seconds / 3600U) % 24U;
+    uint32_t minutes = (uint32_t)(seconds / 60U) % 60U;
+    char *out = wm.clock_text;
+    int at = 0;
+
+    out[at++] = (char)('0' + hours / 10U);
+    out[at++] = (char)('0' + hours % 10U);
+    out[at++] = ':';
+    out[at++] = (char)('0' + minutes / 10U);
+    out[at++] = (char)('0' + minutes % 10U);
+    out[at] = '\0';
+}
+
+static void draw_taskbar(struct gfx_surface *surface)
+{
+    int width = (int)gfx_width();
+    int height = THEME_TASKBAR_HEIGHT;
+    int top = (int)gfx_height() - height;
+    int button_y = top + (height - THEME_TASKBAR_BUTTON_H) / 2;
+    int x;
+
+    gfx_fill(surface, 0, top, width, height, THEME_TASKBAR_FILL);
+    gfx_fill(surface, 0, top, width, 1, THEME_TASKBAR_EDGE);
+
+    /* Launcher.  Wider than a window button because it is labelled, and
+     * labelled because a row of identical squares is a dock with the dock
+     * removed -- the point of the bar is that each button says what it opens. */
+    x = THEME_TASKBAR_PAD;
+    if (wm.taskbar_hover == TASKBAR_LAUNCHER) {
+        gfx_rounded_rect(surface, x, button_y, THEME_START_BUTTON_WIDTH,
+                         THEME_TASKBAR_BUTTON_H, 6,
+                         THEME_TASKBAR_BUTTON_HOVER);
+    }
+    gfx_circle(surface, x + 20, button_y + THEME_TASKBAR_BUTTON_H / 2, 7,
+               THEME_ACCENT);
+    font_draw(surface, x + 34, button_y + THEME_TASKBAR_BUTTON_H - 11, "Klye",
+              THEME_TASKBAR_BUTTON_TEXT, 1);
+
+    /* Running windows, in the order they were opened. */
+    x = THEME_TASKBAR_PAD + THEME_START_BUTTON_WIDTH + THEME_TASKBAR_PAD;
+    for (int index = 0; index < WM_WINDOW_LIMIT; ++index) {
+        struct wm_window *window = &wm.windows[index];
+        const char *label;
+        int button_width;
+
+        if (window->used == 0) {
+            continue;
+        }
+        label = wm_window_title(window);
+        if (label == 0) {
+            label = "Window";
+        }
+        /* Minimized windows keep their button.  Removing it would move every
+         * button after it, so the window you wanted is no longer where you
+         * left the pointer. */
+        button_width = THEME_TASKBAR_PAD * 2 + 14 + font_text_width(label, 1);
+        if (button_width < 64) {
+            button_width = 64;
+        }
+        /* A long title would run the buttons off the edge and hide the later
+         * ones, which are the recently opened and so the ones most likely to
+         * be wanted.  Truncate to what fits. */
+        if (x + button_width > width - 96) {
+            button_width = width - 96 - x;
+        }
+        if (button_width < 24) {
+            break;
+        }
+        if (wm.focused == index) {
+            gfx_rounded_rect(surface, x, button_y, button_width,
+                             THEME_TASKBAR_BUTTON_H, 6,
+                             THEME_TASKBAR_BUTTON_ACTIVE);
+        } else if (wm.taskbar_hover == TASKBAR_WINDOW_BASE + index) {
+            gfx_rounded_rect(surface, x, button_y, button_width,
+                             THEME_TASKBAR_BUTTON_H, 6,
+                             THEME_TASKBAR_BUTTON_HOVER);
+        } else {
+            gfx_rounded_rect(surface, x, button_y, button_width,
+                             THEME_TASKBAR_BUTTON_H, 6,
+                             THEME_TASKBAR_BUTTON);
+        }
+        app_draw_icon(surface, (enum app_id)window->app, x + THEME_TASKBAR_PAD,
+                      button_y + 6, 20);
+        {
+            char name[64];
+            int length = 0;
+
+            while (label[length] != '\0' && length < 40) {
+                name[length] = label[length];
+                length++;
+            }
+            name[length] = '\0';
+            /* The label is clipped to the button rather than to the screen, so
+             * a title that is too long is cut with an ellipsis and does not
+             * bleed over the next button. */
+            while (length > 0 && font_text_width(name, 1) > button_width - 30) {
+                length--;
+                name[length] = '\0';
+            }
+            font_draw(surface, x + THEME_TASKBAR_PAD + 26,
+                      button_y + THEME_TASKBAR_BUTTON_H - 11, name,
+                      THEME_TASKBAR_BUTTON_TEXT, 1);
+        }
+        x += button_width + THEME_TASKBAR_PAD;
+    }
+
+    /* Clock, at the right. */
+    {
+        const char *clock = wm.clock_text;
+        int clock_width = font_text_width(clock, 1);
+        int clock_x = width - THEME_TASKBAR_PAD - clock_width;
+
+        font_draw(surface, clock_x, button_y + THEME_TASKBAR_BUTTON_H - 11,
+                  clock, THEME_TASKBAR_BUTTON_TEXT, 1);
+    }
+}
+
 
 static void window_content_size(enum app_id app, int *width, int *height)
 {
@@ -1437,7 +1563,8 @@ static void redraw_region(struct gfx_surface *surface, const struct gfx_rect *r)
         int count = 0;
 
         for (int index = 0; index < WM_WINDOW_LIMIT; ++index) {
-            if (wm.windows[index].used != 0) {
+            if (wm.windows[index].used != 0 &&
+                wm.windows[index].minimized == 0U) {
                 ordered[count++] = &wm.windows[index];
             }
         }
@@ -1473,22 +1600,34 @@ static void redraw_region(struct gfx_surface *surface, const struct gfx_rect *r)
         wm_stage_mark = t3;
     }
     {
-        struct gfx_rect menubar_rect;
-        struct gfx_rect dock_rect;
+        struct gfx_rect bar_rect;
 
-        menubar_rect.x = 0;
-        menubar_rect.y = 0;
-        menubar_rect.width = (int)gfx_width();
-        menubar_rect.height = menubar_height();
-        if (gfx_rect_overlaps(r, &menubar_rect)) {
-            draw_menubar(surface);
+        /* One bar at the bottom, drawn and hit-tested as one piece.  The
+         * menubar at the top and the dock at the bottom are gone; the
+         * launcher that was in the dock is in the bar now, and the clock that
+         * was in the menubar is in it too, which is where a person looks for
+         * both when there are windows open. */
+        bar_rect.x = 0;
+        bar_rect.y = (int)gfx_height() - THEME_TASKBAR_HEIGHT;
+        bar_rect.width = (int)gfx_width();
+        bar_rect.height = THEME_TASKBAR_HEIGHT;
+        if (gfx_rect_overlaps(r, &bar_rect)) {
+            draw_taskbar(surface);
         }
-        dock_rect.x = 0;
-        dock_rect.y = wm.dock_y - 34;
-        dock_rect.width = (int)gfx_width();
-        dock_rect.height = (int)gfx_height() - dock_rect.y;
-        if (wm.dock_visible && gfx_rect_overlaps(r, &dock_rect)) {
-            draw_dock(surface);
+        if (wm.start_open) {
+            struct gfx_rect menu_rect;
+
+            /* The menu is taller than the bar, so its own rectangle is checked
+             * rather than reusing bar_rect: a repaint of the bar's row has to
+             * bring the menu with it or it is left with holes in it. */
+            menu_rect.x = THEME_TASKBAR_PAD;
+            menu_rect.y = (int)gfx_height() - THEME_TASKBAR_HEIGHT -
+                          start_menu_height();
+            menu_rect.width = 250;
+            menu_rect.height = start_menu_height();
+            if (gfx_rect_overlaps(r, &menu_rect)) {
+                draw_start_menu(surface);
+            }
         }
     }
     {
@@ -1674,6 +1813,13 @@ void wm_benchmark_incremental(uint32_t iterations)
     /* Start from a known state. */
     gfx_damage_all();
     wm.chrome_dirty = 1U;
+    /* Once a second, not once a frame.  The clock used to be formatted inside
+     * the bar's draw, which rebuilt the string every time any part of that row
+     * was damaged. */
+    if (pit_ticks() - wm.clock_updated >= 1000U) {
+        wm.clock_updated = pit_ticks();
+        update_taskbar_clock();
+    }
     repaint_damage();
     gfx_present();
     tick_start = wm_uptime_ticks();
@@ -2309,6 +2455,182 @@ static int desktop_icon_at(int x, int y)
     return -1;
 }
 
+/* Which taskbar item is under the pointer.
+ *
+ * Walked rather than looked up, because the bar lays out its buttons left to
+ * right and the widths depend on the titles, so there is no formula for where
+ * a button is.  Thirty buttons is nothing to walk.
+ */
+static int taskbar_item_at(int x, int y)
+{
+    int bar_top = (int)gfx_height() - THEME_TASKBAR_HEIGHT;
+    int cursor;
+    int width;
+
+    if (y < bar_top) {
+        return TASKBAR_NONE;
+    }
+    if (x >= THEME_TASKBAR_PAD &&
+        x < THEME_TASKBAR_PAD + THEME_START_BUTTON_WIDTH) {
+        return TASKBAR_LAUNCHER;
+    }
+    cursor = THEME_TASKBAR_PAD + THEME_START_BUTTON_WIDTH + THEME_TASKBAR_PAD;
+    for (int index = 0; index < WM_WINDOW_LIMIT; ++index) {
+        struct wm_window *window = &wm.windows[index];
+        const char *label;
+
+        if (window->used == 0) {
+            continue;
+        }
+        label = wm_window_title(window);
+        width = THEME_TASKBAR_PAD * 2 + 14 + font_text_width(label, 1);
+        if (width < 64) {
+            width = 64;
+        }
+        if (x >= cursor && x < cursor + width) {
+            return TASKBAR_WINDOW_BASE + index;
+        }
+        cursor += width + THEME_TASKBAR_PAD;
+    }
+    return TASKBAR_NONE;
+}
+
+/* The same walk, inside the start menu. */
+static int start_menu_item_at(int x, int y)
+{
+    int item_h = 30;
+    int top = (int)gfx_height() - THEME_TASKBAR_HEIGHT - start_menu_height() + 8;
+    int row = top;
+
+    if (wm.start_open == false) {
+        return TASKBAR_NONE;
+    }
+    if (y < (int)gfx_height() - THEME_TASKBAR_HEIGHT - start_menu_height() ||
+        y >= (int)gfx_height() - THEME_TASKBAR_HEIGHT ||
+        x < THEME_TASKBAR_PAD || x >= THEME_TASKBAR_PAD + 250) {
+        return TASKBAR_NONE;
+    }
+    for (int index = 0; index < launcher_count(); ++index) {
+        const struct launcher *entry = launcher_at(index);
+
+        if (!entry->used) {
+            continue;
+        }
+        if (y >= row && y < row + item_h) {
+            return START_ITEM_BASE + index;
+        }
+        row += item_h;
+    }
+    if (y >= row && y < row + item_h) {
+        return START_SETTINGS_ITEM;
+    }
+    row += item_h + 8;
+    for (int index = 0; index < WM_WINDOW_LIMIT; ++index) {
+        if (wm.windows[index].used == 0) {
+            continue;
+        }
+        if (y >= row && y < row + item_h) {
+            return START_WINDOW_BASE + index;
+        }
+        row += item_h;
+    }
+    return TASKBAR_NONE;
+}
+
+/* Hover and click both need to know, and they need to agree. */
+static void update_taskbar_hover(void)
+{
+    int previous_bar = wm.taskbar_hover;
+    int previous_start = wm.start_hover;
+    int bar = taskbar_item_at(wm.mouse_x, wm.mouse_y);
+    int start = TASKBAR_NONE;
+
+    if (bar == TASKBAR_NONE && wm.start_open) {
+        start = start_menu_item_at(wm.mouse_x, wm.mouse_y);
+        /* A press inside the menu, or anywhere in the bar's own row, keeps the
+         * menu open.  A press on the desktop dismisses it. */
+        if (start == TASKBAR_NONE &&
+            wm.mouse_y < (int)gfx_height() - THEME_TASKBAR_HEIGHT) {
+            wm.start_open = false;
+        }
+    }
+    if (wm.taskbar_hover != bar || wm.start_hover != start) {
+        damage_taskbar();
+    }
+    wm.taskbar_hover = bar;
+    wm.start_hover = start;
+    if (previous_bar != bar || previous_start != start) {
+        mark_chrome_dirty();
+    }
+}
+
+static void handle_taskbar_click(void)
+{
+    int item = wm.taskbar_hover;
+
+    if (item == TASKBAR_NONE) {
+        return;
+    }
+    if (item == TASKBAR_LAUNCHER) {
+        wm.start_open = !wm.start_open;
+        damage_taskbar();
+        mark_chrome_dirty();
+        return;
+    }
+    if (item <= START_WINDOW_BASE) {
+        int index = item - START_WINDOW_BASE;
+
+        /* Clicking a window in the menu brings it forward rather than opening
+         * a second copy of it. */
+        if (index >= 0 && index < WM_WINDOW_LIMIT &&
+            wm.windows[index].used != 0) {
+            wm.focused = index;
+            damage_window(index);
+        }
+        wm.start_open = false;
+        damage_taskbar();
+        mark_chrome_dirty();
+        return;
+    }
+    if (item <= START_ITEM_BASE) {
+        const struct launcher *entry = launcher_at(item - START_ITEM_BASE);
+
+        if (entry != 0 && entry->used) {
+            shell_run_app(entry->file);
+        }
+        wm.start_open = false;
+        damage_taskbar();
+        mark_chrome_dirty();
+        return;
+    }
+    if (item == START_SETTINGS_ITEM) {
+        wm_launch_app(APP_SETTINGS);
+        wm.start_open = false;
+        damage_taskbar();
+        mark_chrome_dirty();
+        return;
+    }
+    /* A window button: raise if it was behind, lower if it was already in
+     * front, which is what clicking a taskbar button is for on a desktop that
+     * has them. */
+    {
+        int index = item - TASKBAR_WINDOW_BASE;
+
+        if (index >= 0 && index < WM_WINDOW_LIMIT && wm.windows[index].used != 0) {
+            if (wm.focused == index) {
+                wm.windows[index].minimized = (wm.windows[index].minimized == 0)
+                                                 ? 1U
+                                                 : 0U;
+            } else {
+                wm.windows[index].minimized = 0U;
+                wm.focused = index;
+            }
+            damage_window(index);
+            mark_chrome_dirty();
+        }
+    }
+}
+
 static void handle_mouse_press(void)
 {
     int x = wm.press_x;
@@ -2320,6 +2642,20 @@ static void handle_mouse_press(void)
     int index;
 
     if ((wm.mouse_buttons & MOUSE_BUTTON_LEFT) == 0U) {
+        return;
+    }
+    /* The taskbar takes the press before anything else: the bar is a strip
+     * across the bottom of the screen and a window under it should not get
+     * the click when the bar was what was pointed at. */
+    if (taskbar_item_at(x, y) != TASKBAR_NONE ||
+        (wm.start_open && start_menu_item_at(x, y) != TASKBAR_NONE)) {
+        handle_taskbar_click();
+        return;
+    }
+    if (wm.start_open) {
+        wm.start_open = false;
+        damage_taskbar();
+        mark_chrome_dirty();
         return;
     }
     menu = menu_at(x, y);
@@ -2549,6 +2885,7 @@ static void process_mouse(const struct mouse_event *event)
 
     mouse_move_by(event->delta_x, -event->delta_y);
     wm.mouse_buttons = event->buttons;
+    update_taskbar_hover();
     if ((event->buttons & MOUSE_BUTTON_LEFT) != 0U) {
         wm.press_x = wm.mouse_x;
         wm.press_y = wm.mouse_y;

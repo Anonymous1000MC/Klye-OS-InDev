@@ -79,6 +79,33 @@
 #define THEME_DOCK_BORDER PIXEL_RGB(0x55, 0x5E, 0x70)
 
 #define THEME_MENUBAR_HEIGHT 28
+
+/* The taskbar.
+ *
+ * Traditional desktop layout rather than the menubar-at-top-and-dock-at-bottom
+ * arrangement: one bar along the bottom, launcher at the left, running windows
+ * listed in the middle, and the clock at the right.  It is what a person
+ * expects from a desktop with windows in it, and it puts the two things that
+ * change constantly -- what is running and what time it is -- in one fixed
+ * place instead of in opposite corners.
+ *
+ * Opaque rather than translucent.  The dock was blended so the wallpaper showed
+ * through it; a taskbar that is a strip across the bottom of every screen wants
+ * to read as a fixed piece of furniture, and a translucent bar over a busy
+ * photograph makes the clock and the window buttons hard to read, which is the
+ * one job the bar has. */
+#define THEME_TASKBAR_HEIGHT 44
+#define THEME_TASKBAR_FILL PIXEL_RGB(0x1B, 0x1D, 0x24)
+#define THEME_TASKBAR_EDGE PIXEL_RGB(0x33, 0x37, 0x42)
+#define THEME_TASKBAR_BUTTON PIXEL_RGB(0x2A, 0x2E, 0x38)
+#define THEME_TASKBAR_BUTTON_HOVER PIXEL_RGB(0x38, 0x3D, 0x4A)
+#define THEME_TASKBAR_BUTTON_ACTIVE PIXEL_RGB(0x0A, 0x84, 0xFF)
+#define THEME_TASKBAR_BUTTON_TEXT PIXEL_RGB(0xE8, 0xEA, 0xF0)
+
+/* Start button, at the far left of the bar. */
+#define THEME_START_BUTTON_WIDTH 74
+#define THEME_TASKBAR_PAD 8
+#define THEME_TASKBAR_BUTTON_H 32
 #define THEME_MENU_FONT_HEIGHT 8
 #define THEME_MENU_ITEM_PAD 12
 #define THEME_MENU_ITEM_GAP 2
