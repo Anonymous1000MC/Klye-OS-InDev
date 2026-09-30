@@ -3248,6 +3248,15 @@ void wm_service(void)
             wm.fps_window_start = (uint32_t)pit_ticks();
         }
     }
+    /* Once a second, not once a frame.  The clock used to be formatted inside
+     * the bar's draw, which rebuilt the string every time any part of that row
+     * was damaged -- and nothing called it from the frame loop at all, so the
+     * bar showed whatever was in the buffer. */
+    if (pit_ticks() - wm.clock_updated >= 1000U) {
+        wm.clock_updated = pit_ticks();
+        update_taskbar_clock();
+        damage_taskbar();
+    }
     {
         uint64_t p0;
 
