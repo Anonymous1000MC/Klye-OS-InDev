@@ -13,3 +13,16 @@ DOOM1.wad
 # Built by the ISO build from tests/hello.c.  Committed nowhere: it is a build
 # product, and the source plus the make rule are what belong in the tree.
 rootfs/bin/hello.elf
+
+# Session transcript: a working log of an AI-assisted development run.  Kept
+# local, never published.
+session.json
+
+# User wallpaper in rootfs/home.  User data, not source.
+rootfs/home/klye/mc.png
+
+# musl static-PIE test binaries built during sessions.  Rebuilt from
+# session-notes/STATUS.md, which has the exact command.  rootfs/bin/hello.elf
+# is already ignored above, and deliberately so: it is a build product of
+# tests/hello.c.
+rootfs/bin/*.elf
