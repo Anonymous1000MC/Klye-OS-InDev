@@ -659,8 +659,20 @@ bool elf_run(const char *path)
      * own code rather than a message here. */
     {
         /* Above the heap, not immediately after the image.  See below. */
+        /* Layout, growing upward: image, gap, mmap window, gap, brk heap, gap,
+         * stack.
+         *
+         * brk and mmap must not share.  They did, and both started at the same
+         * address, so malloc's two sources handed it the same page twice: a
+         * buffer allocated by brk was overwritten by an mmap, and musl's
+         * stdout buffer was one of them.  The symptom was not a fault but a
+         * stdio write that passed the kernel a pointer to memory that had since
+         * been reused, which came back as EFAULT for as long as the program ran.
+         *
+         * mmap goes first because it hands out whole pages and wants the room
+         * below it free; brk sits above it and grows toward the stack. */
         uint64_t heap_low = image_end + bias + ELF_MMAP_GAP_BYTES;
-        uint64_t low = heap_low + ELF_HEAP_BYTES + ELF_STACK_GAP_BYTES;
+        uint64_t low = heap_low + ELF_MMAP_BYTES + ELF_STACK_GAP_BYTES;
         uint64_t high = low + ELF_STACK_BYTES;
 
         /* Everything the kernel hands out -- the stack, and every mmap after
@@ -736,7 +748,7 @@ bool elf_run(const char *path)
              * So the stack moves up to leave room, and the two regions are
              * separated: image, gap, heap, gap, stack, growing upward.  Both
              * are inside the window the bump pointer is given below. */
-            uint64_t heap_low = image_end + bias + ELF_MMAP_GAP_BYTES;
+            uint64_t heap_low = low + ELF_STACK_GAP_BYTES;
             uint64_t heap_high = heap_low + ELF_HEAP_BYTES;
             if (heap_high > heap_low) {
                 if (vm_user_map_at(heap_low & ~(uint64_t)(VM_PAGE_BYTES - 1U),

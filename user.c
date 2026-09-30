@@ -534,7 +534,24 @@ static void syscall_dispatch(struct interrupt_registers *regs, uint64_t number)
              * byte sink -- there is nothing after a NUL to write, and counting
              * a run of padding as written would be a different lie. */
             if (!user_pointer_ok(text, length)) {
-                regs->rax = (uint64_t)-14;
+                /* Stop, but report what was already written.
+                 *
+                 * Returning EFAULT here throws away the bytes that went out
+                 * with the earlier entries and tells the caller nothing
+                 * succeeded.  A library that trusts the error and retries with
+                 * the same vector writes the earlier entries again and again,
+                 * and a library that trusts it as fatal stops mid-line.  The
+                 * truthful answer is the number of bytes that reached the
+                 * terminal, which is a short write and which every caller in
+                 * this ABI already knows how to handle. */
+                if (total > 0U) {
+                    /* Some of the vector went out.  Report the count and stop:
+                     * a caller that trusts the number resumes where it left
+                     * off, and one that trusts an error retries the whole
+                     * vector and duplicates what already went out. */
+                    break;
+                }
+                regs->rax = (uint64_t)-14; /* EFAULT: nothing could be written */
                 return;
             }
             for (uint64_t at = 0; at < length; ++at) {

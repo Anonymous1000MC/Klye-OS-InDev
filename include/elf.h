@@ -50,6 +50,11 @@
 #define ELF_MMAP_GAP_BYTES (256U * 1024U)
 #define ELF_STACK_GAP_BYTES (64U * 1024U)
 
+/* The window mmap allocates from, reserved below the brk heap.  It is not the
+ * heap: sharing one address between the two is what made malloc hand out the
+ * same page twice. */
+#define ELF_MMAP_BYTES (8U * 1024U * 1024U)
+
 #define ELF_HEAP_BYTES (4U * 1024U * 1024U)
 
 /* Load and start the ELF executable at `path`.
