@@ -90,7 +90,6 @@ user_kernel_stack_end:
  * how far execution got is to have said so on the way in. */
 .extern serial_marker_ptr_enter
 .extern serial_marker_ptr_in_kernel
-.extern serial_marker_ptr_return
 
 /* Entering ring 3 for the first time.
  *
@@ -286,9 +285,21 @@ syscall_return:
      * so they are replaced before the marker call, which is the first thing
      * that would do one. */
     movq $0x10, %rax              /* kernel data; rax is free, the frame is gone */
-    movq %rax, %ds
-    movq %rax, %es
-    call serial_marker_ptr_return
+    mov %rax, %ds
+    mov %rax, %es
+
+    /* There was a serial marker here, and it was a C call made after the
+     * register pops, with the program's registers live.  A C function is free
+     * to clobber every caller-saved register and obliged to preserve only the
+     * callee-saved ones, so it destroyed rdi, rsi, rdx and r8 and left rbx,
+     * rbp and r12 through r15 alone.  That is exactly the pattern the canary
+     * reported, and it survived every theory about the frame because the frame
+     * was never involved: the values were correct on the way in, and this call
+     * wrecked them on the way out.
+     *
+     * Nothing in a return path may call into the kernel.  The trace is worth
+     * less than a syscall that does not damage the caller. */
+
 
     /* Hand the data selectors back before dropping privilege, so the program
      * does not find the kernel's descriptors loaded when it resumes.  A data
