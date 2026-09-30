@@ -84,3 +84,32 @@ that get past TLS; the current `rootfs/bin/musl.elf` is the `main`+`return 42`
 one. **Boot the ISO by hand and type the commands** -- `tr.py` has been sending
 keystrokes that never reach the shell, and a blank log means the harness failed,
 not that the kernel failed.
+
+## 2026-09-30 later: file I/O landed, stdio is not fixed
+
+**Working and verified.** A musl program with no stdio opens a file in the
+image, reads it, closes it and exits 42. `open` returns a descriptor, `read`
+returns real content, `close` succeeds. The register canary is 12/12 and the
+host suite is 7/7.
+
+`write(2)` also returns correctly at the kernel boundary -- strace shows
+`->abcde5` for a five-byte write -- and `printf("XY\n")` does produce `XY`, and
+the writev returns the right count.
+
+**Broken: the guest reads garbage return values from a working syscall.** A
+program that does `dec(write(1, "abcde", 5))` prints `6840998410471589`
+instead of `5`, and the *same* wrong value for every call. The kernel side is
+provably correct for the same call, so the value is being lost or replaced on
+the way back into the guest between the `sysretq` and the program's read of the
+return register.
+
+The register canary passes all twelve, which is the confusing part: it issues a
+bare syscall and reads the registers immediately after, with no function call in
+between. A program that receives the value as a call argument and then calls
+another function is exercising something the canary does not.
+
+**Not diagnosed.** Next step is not to guess: print the return value in the
+canary after a real call-and-return sequence, or find where the frame's rax
+slot is read back differently from the canary's path. Everything needed to
+bisect is in the tree -- `tests/` has the pattern for a host-side check, and
+`usertest.S` is where a call-after-syscall canary belongs.
