@@ -658,8 +658,18 @@ bool elf_run(const char *path)
      * and a stack that is too small is a fault in the middle of the program's
      * own code rather than a message here. */
     {
-        uint64_t low = image_end + bias;
+        /* Above the heap, not immediately after the image.  See below. */
+        uint64_t heap_low = image_end + bias + ELF_MMAP_GAP_BYTES;
+        uint64_t low = heap_low + ELF_HEAP_BYTES + ELF_STACK_GAP_BYTES;
         uint64_t high = low + ELF_STACK_BYTES;
+
+        /* Everything the kernel hands out -- the stack, and every mmap after
+         * it -- comes from one bump pointer, and it has to start above the
+         * program's own image.  Doing this after the stack was taken moved the
+         * pointer backwards into the image, and the first mmap a library made
+         * returned USER_ELF_LOAD_BIAS exactly: its first allocation landed on
+         * its own text and nothing after it worked. */
+        vm_set_mmap_base(image_end + bias + ELF_MMAP_GAP_BYTES);
 
         /* Mapped at an address chosen here rather than bump allocated, because
          * the window's own pointer is still at the bottom and the segments own
@@ -717,16 +727,17 @@ bool elf_run(const char *path)
              * because the corruption is of the program's data and not of its
              * registers.  That is what made it look like a return-value bug.
              */
-            uint64_t heap_high = low;              /* bottom of the stack */
-            uint64_t heap_low = heap_high - ELF_HEAP_BYTES;
-
-            /* Not enough room between the image and the stack.  Give the
-             * program a stack anyway and say so, rather than mapping a heap
-             * over the image. */
-            if (heap_low < image_end + bias) {
-                heap_low = image_end + bias;
-                heap_high = heap_low;
-            }
+            /* Above the image, below the stack.  The stack region was placed
+             * immediately after the image, which left about 128 KiB between
+             * them -- not enough for a 4 MiB heap, and a heap that does not
+             * fit ends up computed as an address below the image, in a
+             * different part of the space entirely.
+             *
+             * So the stack moves up to leave room, and the two regions are
+             * separated: image, gap, heap, gap, stack, growing upward.  Both
+             * are inside the window the bump pointer is given below. */
+            uint64_t heap_low = image_end + bias + ELF_MMAP_GAP_BYTES;
+            uint64_t heap_high = heap_low + ELF_HEAP_BYTES;
             if (heap_high > heap_low) {
                 if (vm_user_map_at(heap_low & ~(uint64_t)(VM_PAGE_BYTES - 1U),
                                    (size_t)(heap_high - heap_low)) == 0) {
@@ -734,10 +745,6 @@ bool elf_run(const char *path)
                     return false;
                 }
                 user_set_heap(heap_low, heap_high);
-                /* mmap is a bump allocation from the same window, and that
-                 * window's pointer still points at the bottom, where this
-                 * program's own segments are.  Tell it where the program ends. */
-                vm_set_mmap_base(heap_high);
             }
         }
     }

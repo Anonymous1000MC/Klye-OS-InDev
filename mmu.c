@@ -435,9 +435,15 @@ void *vm_user_map_at(uint64_t virtual_address, size_t bytes)
  * allocation from that same pointer, would hand out addresses the program is
  * already using.  The loader calls this once it has finished placing the image,
  * the stack and the heap, and mmap starts above them. */
+/* Move the bump pointer that both mmap and the stack come out of.
+ *
+ * Not a floor and not a ceiling: this is where the next allocation starts, and
+ * it has to move *down* as well as up.  Setting it to an address below the
+ * current position would otherwise be ignored, and a loader that puts the heap
+ * below the image ends up handing the program's own text back to malloc. */
 void vm_set_mmap_base(uint64_t address)
 {
-    if (address > vm_user_next && address <= vm_user_limit) {
+    if (address <= vm_user_limit) {
         vm_user_next = address;
     }
 }

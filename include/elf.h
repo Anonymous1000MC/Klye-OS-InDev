@@ -43,6 +43,13 @@
  * brk moves a break inside a region the program owns; it does not map more on
  * demand.  Reserving it up front costs address space and nothing else, and it
  * means a program cannot grow its heap over a page another program is using. */
+/* Gap between the end of a program's image and where the heap starts, and
+ * between the heap and where the stack region begins.  The image and the stack
+ * are far too close together for a 4 MiB heap between them: there are about
+ * 128 KiB, and a heap that does not fit lands below the image entirely. */
+#define ELF_MMAP_GAP_BYTES (256U * 1024U)
+#define ELF_STACK_GAP_BYTES (64U * 1024U)
+
 #define ELF_HEAP_BYTES (4U * 1024U * 1024U)
 
 /* Load and start the ELF executable at `path`.

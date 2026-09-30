@@ -177,6 +177,7 @@ user_enter:
     movq %rax, %rdx
     shrq $32, %rdx
     wrmsr
+
     call serial_marker_ptr_enter
     iretq
 
