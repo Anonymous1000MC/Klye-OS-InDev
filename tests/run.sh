@@ -118,6 +118,17 @@ if ! "$out/gfx_test"; then
     status=1
 fi
 
+# The settings store: clamping on the way in and out, unknown keys tolerated,
+# a save that truncates.  Stubbed filesystem, so this is the store and not the
+# VFS under it.
+$cc $cflags -c "$here/settings_test.c" -o "$out/settings_test.o"
+$cc $cflags -c "$here/../settings.c" -o "$out/settings.o"
+$cc "$out/settings_test.o" "$out/settings.o" -o "$out/settings_test"
+if ! "$out/settings_test"; then
+    echo "settings_test FAILED"
+    status=1
+fi
+
 # The 8x16 font.  The properties here are ones a wrong table offset still
 # passes -- letters that have ink, glyphs that are not blank -- and the ones it
 # fails: a capital with no ink in the top half is a table shifted by a row, and

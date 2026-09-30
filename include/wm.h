@@ -25,6 +25,13 @@ enum wm_action {
     WM_ACTION_SHUTDOWN,
     WM_ACTION_CLEAR_TERMINAL,
     WM_ACTION_FOCUS_NEXT,
+    /* Settings panel: move between rows, and change the selected value. */
+    WM_ACTION_SETTING_UP,
+    WM_ACTION_SETTING_DOWN,
+    WM_ACTION_SETTING_DECREASE,
+    WM_ACTION_SETTING_INCREASE,
+    WM_ACTION_SETTINGS_CATEGORY_UP,
+    WM_ACTION_SETTINGS_CATEGORY_DOWN,
     WM_ACTION_COUNT
 };
 
@@ -57,5 +64,6 @@ uint64_t wm_uptime_ticks(void);
 void wm_run_boot_animation(void);
 void wm_set_ready(bool ready);
 void wm_benchmark(uint32_t iterations);
+void wm_benchmark_incremental(uint32_t iterations);
 
 #endif

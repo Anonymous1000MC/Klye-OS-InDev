@@ -6,6 +6,7 @@
 #include "font.h"
 #include "gfx.h"
 #include "heap.h"
+#include "settings.h"
 #include "png.h"
 #include "input.h"
 #include "kby.h"
@@ -128,6 +129,9 @@ struct wm_state {
     int dock_y;
     /* Which taskbar item the pointer is over, or TASKBAR_NONE. */
     int taskbar_hover;
+    /* The Settings panel: which category is listed, which row is selected. */
+    int settings_category;
+    int settings_row;
     /* Is the start menu open, and what is the pointer over inside it. */
     bool start_open;
     int start_hover;
@@ -847,6 +851,89 @@ static void update_dock_animation(void)
 /* A launcher's icon, or a sane default when the field is not one of ours.
  * The value is parsed from a file in rootfs and may be absent, negative, or
  * larger than the list of applications. */
+/* Which settings each category in the panel lists.
+ *
+ * The keys are grouped here rather than in the store, because the grouping is
+ * a thing about how the panel looks and the store does not care how the values
+ * are arranged on screen. */
+static int settings_category_count(int category)
+{
+    static const char *const compositor[] = {
+        "compositor.fps_limit", "compositor.fps_window", NULL
+    };
+    static const char *const display[] = {
+        "display.scale", "display.wallpaper", "theme.accent", NULL
+    };
+    static const char *const windows[] = {
+        "window.snap", "window.minimum_width", "window.minimum_height", NULL
+    };
+    static const char *const terminal[] = {
+        "terminal.lines", "terminal.columns", "terminal.cursor_blink", NULL
+    };
+    static const char *const system[] = {
+        "sound.enabled", "boot.show_banner", NULL
+    };
+    const char *const *group = NULL;
+    int count = 0;
+
+    if (category == 0) {
+        group = compositor;
+    } else if (category == 1) {
+        group = display;
+    } else if (category == 2) {
+        group = windows;
+    } else if (category == 3) {
+        group = terminal;
+    } else {
+        group = system;
+    }
+    while (group[count] != NULL) {
+        count++;
+    }
+    return count;
+}
+
+static const char *settings_category_key(int category, int index)
+{
+    static const char *const compositor[] = {
+        "compositor.fps_limit", "compositor.fps_window"
+    };
+    static const char *const display[] = {
+        "display.scale", "display.wallpaper", "theme.accent"
+    };
+    static const char *const windows[] = {
+        "window.snap", "window.minimum_width", "window.minimum_height"
+    };
+    static const char *const terminal[] = {
+        "terminal.lines", "terminal.columns", "terminal.cursor_blink"
+    };
+    static const char *const system[] = {
+        "sound.enabled", "boot.show_banner"
+    };
+    const char *const *group;
+    int count = settings_category_count(category);
+    int at = 0;
+
+    if (category == 0) {
+        group = compositor;
+    } else if (category == 1) {
+        group = display;
+    } else if (category == 2) {
+        group = windows;
+    } else if (category == 3) {
+        group = terminal;
+    } else {
+        group = system;
+    }
+    for (int i = 0; i <= index && at < count; ++i) {
+        if (i == index) {
+            return group[at];
+        }
+        at++;
+    }
+    return "display.scale";
+}
+
 static enum app_id launcher_icon(const struct launcher *entry)
 {
     if (entry != 0 && entry->used && entry->icon >= 0 &&
@@ -1356,53 +1443,124 @@ static void draw_window_content(struct gfx_surface *surface,
         break;
     }
     case APP_SETTINGS: {
+        /* A real settings panel.
+         *
+         * This was six categories down the side with one highlighted and a
+         * column of labels carrying fixed values.  Nothing in it was connected
+         * to anything, so every number on it was whatever the drawing code
+         * said, and changing one was impossible because there was nothing to
+         * change.
+         *
+         * Now the categories are a list of real setting keys, the values come
+         * out of the store, and the panel shows what the system is actually
+         * doing where the value is not something a person can change -- the
+         * frame rate is measured, and a setting that claimed otherwise would
+         * be a lie here as well as on the boot screen.
+         */
+        static const char *const category_names[] = {
+            "Compositor", "Display", "Windows", "Terminal", "System"
+        };
+        enum { CATEGORY_COUNT = 5 };
+        int row_height = 26;
+        int panel_x = x + 176;
+        int row;
+        int entries;
+
         gfx_fill(surface, x, y, width, height, THEME_SURFACE);
         gfx_fill(surface, x, y, 168, height, THEME_SURFACE_SUNKEN);
         gfx_vertical_line(surface, x + 168, y, height, THEME_SEPARATOR);
-        font_draw(surface, x + 12, y + 20, "GENERAL", THEME_TEXT_TERTIARY, 1);
-        {
-            static const char *const rows[] = {
-                "Appearance", "Compositor", "Display", "Sound",
-                "Keyboard", "About"
-            };
-            int row = y + 40;
 
-            for (int index = 0; index < 6; ++index) {
-                bool selected = index == 1;
+        font_draw(surface, x + 12, y + 20, "SETTINGS", THEME_TEXT_TERTIARY, 1);
+        row = y + 38;
+        for (int index = 0; index < CATEGORY_COUNT; ++index) {
+            bool selected = (int)wm.settings_category == index;
 
-                if (selected) {
-                    gfx_rounded_rect(surface, x + 6, row, 156, 26, 6,
-                                     THEME_ACCENT);
+            if (selected) {
+                gfx_rounded_rect(surface, x + 6, row, 156, row_height - 4, 6,
+                                 THEME_ACCENT);
+            }
+            font_draw(surface, x + 18, row + 16, category_names[index],
+                      selected ? THEME_TEXT_ON_DARK : THEME_TEXT_PRIMARY, 1);
+            row += row_height;
+        }
+
+        /* The panel: a heading, then one line per setting in the category. */
+        font_draw(surface, panel_x, y + 26, category_names[wm.settings_category],
+                  THEME_TEXT_PRIMARY, 1);
+        gfx_horizontal_line(surface, panel_x, y + 36, width - 200, THEME_SEPARATOR);
+
+        entries = settings_category_count(wm.settings_category);
+        row = y + 56;
+        for (int index = 0; index < entries && index < 12; ++index) {
+            const char *key = settings_category_key(wm.settings_category,
+                                                    index);
+            uint32_t value = settings_get(key);
+            int edit_y = row - 4;
+            bool selected = (int)wm.settings_row == index;
+
+            /* The key, with the prefix stripped: "window.minimum_width" reads
+             * as "minimum width", which is a label rather than an identifier.
+             */
+            {
+                const char *label = key;
+                const char *dot = label;
+
+                while (*dot != '\0' && *dot != '.') {
+                    dot++;
                 }
-                font_draw(surface, x + 18, row + 17, rows[index],
-                          selected ? THEME_TEXT_ON_DARK : THEME_TEXT_PRIMARY, 1);
-                row += 30;
+                label = (*dot == '.') ? dot + 1 : label;
+                font_draw(surface, panel_x, row, label, THEME_TEXT_PRIMARY, 1);
             }
-        }
-        font_draw(surface, x + 188, y + 26, "Compositor", THEME_TEXT_PRIMARY, 1);
-        font_draw(surface, x + 188, y + 40, "Display Engine", THEME_TEXT_TERTIARY,
-                  1);
-        {
-            static const char *const labels[] = {
-                "Frame pacing", "Damage tracking", "Presentation",
-                "Rounded corners", "Frosted surfaces", "Dock magnification"
-            };
-            static const char *const values[] = {
-                "measured, 1000 hz timer", "enabled", "double buffered",
-                "anti-aliased", "enabled", "1.55x"
-            };
-            int row = y + 62;
+            /* The value, and a box around it if this row is the one selected,
+             * so it is visible that left and right change *this* and not some
+             * other one. */
+            {
+                char shown[16];
+                uint32_t at = 0U;
+                uint32_t v = value;
 
-            for (int index = 0; index < 6; ++index) {
-                gfx_horizontal_line(surface, x + 188, row - 6, width - 210,
-                                    THEME_SEPARATOR);
-                font_draw(surface, x + 188, row + 10, labels[index],
-                          THEME_TEXT_PRIMARY, 1);
-                font_draw_right(surface, x + width - 24, row + 10, values[index],
-                                THEME_TEXT_SECONDARY, 1);
-                row += 34;
+                if (v == 0U) {
+                    shown[at++] = '0';
+                } else {
+                    char digits[12];
+                    uint32_t count = 0U;
+
+                    while (v > 0U && count < 11U) {
+                        digits[count++] = (char)('0' + v % 10U);
+                        v /= 10U;
+                    }
+                    while (count > 0U && at < 15U) {
+                        shown[at++] = digits[--count];
+                    }
+                }
+                shown[at] = '\0';
+                {
+                    int box_w = font_text_width(shown, 1) + 24;
+                    int box_x = x + width - box_w - 16;
+
+                    if (selected) {
+                        gfx_rounded_rect(surface, box_x, edit_y, box_w,
+                                         row_height - 4, 5, THEME_ACCENT_SOFT);
+                    }
+                    /* Left and right, so the affordance is on screen. */
+                    font_draw(surface, box_x + 6, row, "<", THEME_TEXT_SECONDARY,
+                              1);
+                    font_draw(surface, box_x + box_w - 12, row, ">", 
+                              THEME_TEXT_SECONDARY, 1);
+                    font_draw(surface, box_x + 12, row, shown,
+                              selected ? THEME_TEXT_PRIMARY : THEME_TEXT_SECONDARY,
+                              1);
+                }
             }
+            row += row_height + 6;
         }
+        if (entries == 0) {
+            font_draw(surface, panel_x, y + 56, "Nothing to change here yet.",
+                      THEME_TEXT_TERTIARY, 1);
+        }
+        font_draw(surface, panel_x, y + height - 20,
+                  "Left and right change the selected value.",
+                  THEME_TEXT_TERTIARY, 1);
         break;
     }
     case APP_BROWSER: {
@@ -2280,6 +2438,56 @@ void wm_run_action(enum wm_action action)
     case WM_ACTION_MINIMIZE_WINDOW:
         wm_minimize_focused();
         break;
+    case WM_ACTION_SETTING_UP:
+        if (wm.settings_row > 0) {
+            wm.settings_row--;
+        } else {
+            wm.settings_row = settings_category_count(wm.settings_category) - 1;
+        }
+        damage_window(wm.focused);
+        mark_chrome_dirty();
+        break;
+    case WM_ACTION_SETTING_DOWN:
+        if (wm.settings_row + 1 < settings_category_count(wm.settings_category)) {
+            wm.settings_row++;
+        } else {
+            wm.settings_row = 0;
+        }
+        damage_window(wm.focused);
+        mark_chrome_dirty();
+        break;
+    case WM_ACTION_SETTINGS_CATEGORY_UP:
+        wm.settings_category = (wm.settings_category + 4) % 5;
+        wm.settings_row = 0;
+        damage_window(wm.focused);
+        mark_chrome_dirty();
+        break;
+    case WM_ACTION_SETTINGS_CATEGORY_DOWN:
+        wm.settings_category = (wm.settings_category + 1) % 5;
+        wm.settings_row = 0;
+        damage_window(wm.focused);
+        mark_chrome_dirty();
+        break;
+    case WM_ACTION_SETTING_DECREASE:
+    case WM_ACTION_SETTING_INCREASE: {
+        /* The change goes through the store, which clamps it and saves the
+         * file, so a value that cannot be set never appears in memory either.
+         * A step that changes nothing reports no change and does not write. */
+        const char *key = settings_category_key(wm.settings_category,
+                                                wm.settings_row);
+        uint32_t value = settings_get(key);
+        int step = (action == WM_ACTION_SETTING_INCREASE) ? 1 : -1;
+
+        if (step < 0 && value > 0U) {
+            value--;
+        } else if (step > 0) {
+            value++;
+        }
+        (void)settings_set(key, value);
+        damage_window(wm.focused);
+        mark_chrome_dirty();
+        break;
+    }
     case WM_ACTION_ZOOM_WINDOW:
         /* Fill the screen and restore to where it was.  This used to shrink the
          * window to eighty percent and call that zooming, which is not what
