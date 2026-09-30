@@ -49,6 +49,7 @@ int vfs_read(const char *path, char *out, uint32_t max);
  * into the file, and re-reading the whole file for each of them would mean
  * holding a whole executable in memory at once. */
 int vfs_read_at(const char *path, char *out, uint32_t offset, uint32_t max);
+int vfs_read_at_node(int index, char *out, uint32_t offset, uint32_t max);
 int vfs_write(const char *path, const char *data, uint32_t length);
 int vfs_append(const char *path, const char *data, uint32_t length);
 int vfs_truncate(const char *path);

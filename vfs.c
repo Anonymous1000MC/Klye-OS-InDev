@@ -833,12 +833,12 @@ int vfs_open(const char *path)
     return index;
 }
 
-int vfs_read_at(const char *path, char *out, uint32_t offset, uint32_t max)
+int vfs_read_at_node(int index, char *out, uint32_t offset, uint32_t max)
 {
-    int index = vfs_open(path);
     uint32_t length;
 
-    if (index < 0 || out == 0) {
+    if (index < 0 || index >= VFS_MAX_NODES || !vfs_nodes[index].used ||
+        out == 0) {
         return -1;
     }
     length = vfs_nodes[index].size;
@@ -865,6 +865,15 @@ int vfs_read_at(const char *path, char *out, uint32_t offset, uint32_t max)
         at += chunk;
     }
     return (int)max;
+}
+
+/* The path form, for callers that have a name and no descriptor.  A file
+ * descriptor already holds the node index, so going by path here would mean
+ * resolving a name the program may since have been unable to change, and it
+ * would be a wasted lookup on every read. */
+int vfs_read_at(const char *path, char *out, uint32_t offset, uint32_t max)
+{
+    return vfs_read_at_node(vfs_open(path), out, offset, max);
 }
 
 int vfs_read(const char *path, char *out, uint32_t max)

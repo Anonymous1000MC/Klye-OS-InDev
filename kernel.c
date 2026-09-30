@@ -11,6 +11,7 @@
 #include "heap.h"
 #include "kernel.h"
 #include "scheduler.h"
+#include "fdtable.h"
 #include "shell.h"
 #include "theme.h"
 #include "wm.h"
@@ -1217,6 +1218,11 @@ void kernel_main(uint64_t framebuffer_address, uint32_t pitch,
 
     scheduler_init(boot_stack);
     post("TASK SCHEDULER", "OK");
+
+    /* The standard descriptors, before anything can run.  A C library asks
+     * for the window size on stdout during its own startup, so a process
+     * without them fails in its initialisation rather than in the program. */
+    fd_table_init();
 
     if (vfs_mount() && vfs_mounted()) {
         post("VIRTUAL FILESYSTEM", "OK");

@@ -14,6 +14,8 @@
 #include "io.h"
 #include "mmu.h"
 #include "scheduler.h"
+#include "vfs.h"
+#include "fdtable.h"
 #include "kernel.h"
 
 /* Selectors.  The ring 3 halves matter: a segment selector carries the ring
@@ -37,6 +39,80 @@ static uint64_t user_exit_code;
 #define SYS_ARCH_PRCTL 158
 #define SYS_SET_TID_ADDRESS 218
 #define SYS_GETTID 186
+
+/* The user half, and low enough to miss anything the kernel maps.  These
+ * match the range elf.c will load a program into, so a pointer a program
+ * legitimately holds always passes. */
+#define USER_POINTER_LOW 0x100000ULL
+#define USER_POINTER_HIGH 0x00007FFFFFFFF000ULL
+
+/* A user pointer, checked.  A syscall that dereferences what the program
+ * passed has to know the pointer is in the user half before it reads it, or a
+ * program with a bad pointer takes the kernel down with it: the read faults in
+ * ring 0, where there is nothing to catch it, and the whole machine stops.
+ *
+ * A vector array is a handful of entries, so the check is on the whole span
+ * at once rather than per entry. */
+static bool user_pointer_ok(const void *pointer, uint64_t length)
+{
+    uint64_t start = (uint64_t)(uintptr_t)pointer;
+
+    if (length == 0U) {
+        return start < USER_POINTER_HIGH;
+    }
+    if (start < USER_POINTER_LOW || start >= USER_POINTER_HIGH) {
+        return false;
+    }
+    if (length > USER_POINTER_HIGH - start) {
+        return false;
+    }
+    return true;
+}
+
+/* The vector entry a readv/writev is given.  Linux puts the address first and
+ * the length second, and the order is load-bearing: a program builds these
+ * from its own headers and the kernel reads the bytes, so getting the fields
+ * the wrong way round does not fail -- it reads the length as an address and
+ * the address as a length, and then faults in ring 0 on what it believes is
+ * text. */
+struct iovec {
+    uint64_t iov_base;
+    uint64_t iov_len;
+};
+
+/* File syscalls.  musl's stdio uses open, read, readv, writev, lseek, close
+ * and ioctl, and touches fstat and fcntl only for particular open modes.  The
+ * two that are easy to miss are readv: __stdio_read issues a two-entry vector
+ * read for every buffered read, falling back to plain read only when the
+ * caller's buffer is empty.  And ioctl: __fdopen asks for the window size on
+ * any FILE that is not read-only, to know how wide its output may be. */
+#define SYS_READ 0
+#define SYS_CLOSE 3
+#define SYS_LSEEK 8
+#define SYS_OPEN 2
+#define SYS_IOCTL 16
+#define SYS_READV 19
+#define SYS_WRITEV 20
+#define SYS_OPENAT 257
+#define SYS_FSTAT 5
+#define SYS_RT_SIGPROCMASK 14
+
+/* open(2) flags, x86-64 Linux values.  Only the ones that change behaviour
+ * are named; the rest are accepted and ignored, because refusing an open a
+ * program had every right to make is a worse failure than serving it. */
+#define O_ACCMODE 0003
+#define O_RDONLY 0
+#define O_WRONLY 1
+#define O_RDWR 2
+#define O_CREAT 0100
+#define O_TRUNC 01000
+#define O_APPEND 02000
+
+/* The ioctl request musl sends for a window size, and the answer it expects
+ * from something that is not a terminal.  Returning ENOTTY is the honest
+ * reply: this is not a tty, and the library carries on with a default width. */
+#define TIOCGWINSZ 0x5413
+#define ENOTTY 25
 #define SYS_EXIT     60
 
 /* arch_prctl subcommands, and the one that matters here.
@@ -292,6 +368,15 @@ void syscall_handler(struct interrupt_registers *regs, uint64_t number)
 static void syscall_dispatch(struct interrupt_registers *regs, uint64_t number)
 {
     switch (number) {
+    case SYS_RT_SIGPROCMASK:
+        /* Not implemented as a mask -- there is nothing to deliver yet -- but
+         * it has to answer rather than spin.  musl calls this from abort, so
+         * a program that hits any fatal condition and then retries gets an
+         * unbounded loop of sigprocmask that looks like a signal delivery
+         * fault and is not one.  Succeeding with no change is the least
+         * surprising answer until there is a signal mask to change. */
+        regs->rax = 0U;
+        return;
     case SYS_WRITE: {
         /* arguments come in the registers the C ABI already uses, which is
          * also what Linux uses, so no shuffling is needed and none is done */
@@ -337,6 +422,275 @@ static void syscall_dispatch(struct interrupt_registers *regs, uint64_t number)
     case SYS_MMAP:
         user_do_mmap(regs);
         return;
+    case SYS_OPEN:
+    case SYS_OPENAT: {
+        /* open(2) is a path and flags.  openat(2) is the same with a
+         * directory descriptor first, and the only one that can be relative
+         * to something other than the working directory -- of which there is
+         * one, so AT_FDCWD is the whole of it today.
+         *
+         * The C library calls open first and openat second, on the theory
+         * that a kernel without open is old.  Both are cheap and both are
+         * implemented, because a program that only ever gets -ENOSYS from one
+         * of them has no way to open anything. */
+        const char *path;
+        uint64_t flags;
+        int access;
+        bool creating;
+        int node;
+        int fd;
+
+        if (number == SYS_OPEN) {
+            path = (const char *)(uintptr_t)regs->rdi;
+            flags = regs->rsi;
+        } else {
+            path = (const char *)(uintptr_t)regs->rsi;
+            flags = regs->rdx;
+        }
+        if (path == 0) {
+            regs->rax = (uint64_t)-14; /* EFAULT */
+            return;
+        }
+        access = (int)(flags & O_ACCMODE);
+        creating = (flags & O_CREAT) != 0U;
+
+        node = vfs_open(path);
+        if (node < 0) {
+            if (!creating) {
+                regs->rax = (uint64_t)-2; /* ENOENT */
+                return;
+            }
+            /* Creation is served if the VFS can do it, and refused clearly if
+             * it cannot.  A create that silently does nothing would leave the
+             * program writing into a descriptor whose contents go nowhere. */
+            if (vfs_touch(path) < 0) {
+                regs->rax = (uint64_t)-30; /* EROFS: read-only image */
+                return;
+            }
+            node = vfs_open(path);
+            if (node < 0) {
+                regs->rax = (uint64_t)-2;
+                return;
+            }
+        }
+        fd = fd_alloc_file(node, access != O_WRONLY, access != O_RDONLY);
+        if (fd < 0) {
+            regs->rax = (uint64_t)-24; /* EMFILE */
+            return;
+        }
+        regs->rax = (uint64_t)(int64_t)fd;
+        return;
+    }
+    case SYS_WRITEV: {
+        /* musl's buffered write is a vector write, and it is the only way
+         * printf reaches the terminal.  Returning ENOSYS here does not fail
+         * the call cleanly -- musl treats it as a fatal write error, reports
+         * it through the same path, and retries forever.
+         *
+         * The count in rdx is how many iovecs there are, and it is bounded by
+         * what the caller claims.  A count of all-ones would walk the vector
+         * array off the end of the mapping, so it is clamped: no writev needs
+         * more entries than there are bytes it could describe. */
+        const struct iovec *iov = (const struct iovec *)(uintptr_t)regs->rsi;
+        uint64_t iovcnt = regs->rdx;
+        uint64_t total = 0U;
+
+        if (iov == 0 || iovcnt == 0U) {
+            regs->rax = 0U;
+            return;
+        }
+        if (!fd_is_writable((int)regs->rdi)) {
+            regs->rax = (uint64_t)-9; /* EBADF */
+            return;
+        }
+        if (iovcnt > 1024U) {
+            iovcnt = 1024U;
+        }
+        /* The vector array and the bytes it points at are both the program's
+         * memory, and both have to be checked before either is read.  A bad
+         * one is the program's mistake, not the kernel's, and EFAULT is how
+         * a program is told so. */
+        if (!user_pointer_ok(iov, iovcnt * (uint64_t)sizeof(struct iovec))) {
+            regs->rax = (uint64_t)-14; /* EFAULT */
+            return;
+        }
+        for (uint64_t i = 0; i < iovcnt; ++i) {
+            const char *text = (const char *)(uintptr_t)iov[i].iov_base;
+            uint64_t length = iov[i].iov_len;
+
+            if (text == 0) {
+                continue;
+            }
+            /* Checked against the length actually in the entry, not the
+             * count.  A length of all-ones would otherwise pass a pointer
+             * check and then be used as a loop bound. */
+            if (!user_pointer_ok(text, length)) {
+                regs->rax = (uint64_t)-14;
+                return;
+            }
+            for (uint64_t at = 0; at < length; ++at) {
+                if (text[at] == 0) {
+                    break;
+                }
+                serial_putc(text[at]);
+                total++;
+            }
+        }
+        regs->rax = total;
+        return;
+    }
+    case SYS_READ: {
+        char *out = (char *)(uintptr_t)regs->rsi;
+        uint32_t count = (uint32_t)regs->rdx;
+        int node;
+        int got;
+
+        if (!fd_is_readable((int)regs->rdi)) {
+            regs->rax = (uint64_t)-9; /* EBADF */
+            return;
+        }
+        if (out == 0 || count == 0U) {
+            regs->rax = 0U;
+            return;
+        }
+        node = fd_node((int)regs->rdi);
+        if (node < 0) {
+            /* A read from the console has no data to give and no way to wait
+             * for any.  Zero is what a non-blocking read at end of input
+             * returns, and an error here would make every program that polls
+             * its own input think the descriptor is broken. */
+            regs->rax = 0U;
+            return;
+        }
+        got = vfs_read_at_node(node, out, fd_cursor((int)regs->rdi), count);
+        if (got < 0) {
+            regs->rax = (uint64_t)-5; /* EIO */
+            return;
+        }
+        fd_advance((int)regs->rdi, (uint32_t)got);
+        regs->rax = (uint64_t)(int64_t)got;
+        return;
+    }
+    case SYS_READV: {
+        /* A vector read, and not an exotic one: musl's buffered read issues
+         * this for every read, with one iovec for the caller's buffer and
+         * room in the second for anything left over.  Returning ENOSYS here
+         * does not fail the call cleanly -- it strands the second entry and
+         * the library's buffer bookkeeping stops matching the file, which
+         * looks later like a filesystem bug rather than a missing syscall. */
+        const struct iovec *iov = (const struct iovec *)(uintptr_t)regs->rsi;
+        uint64_t iovcnt = regs->rdx;
+        uint32_t total = 0U;
+        int node;
+
+        if (!fd_is_readable((int)regs->rdi)) {
+            regs->rax = (uint64_t)-9;
+            return;
+        }
+        node = fd_node((int)regs->rdi);
+        if (iov == 0 || iovcnt == 0U) {
+            regs->rax = 0U;
+            return;
+        }
+        for (uint64_t i = 0; i < iovcnt; ++i) {
+            char *base = (char *)(uintptr_t)iov[i].iov_base;
+            uint32_t length = (uint32_t)iov[i].iov_len;
+            int got;
+
+            if (base == 0 || length == 0U) {
+                continue;
+            }
+            if (node < 0) {
+                break;
+            }
+            got = vfs_read_at_node(node, base, fd_cursor((int)regs->rdi), length);
+            if (got <= 0) {
+                break;
+            }
+            fd_advance((int)regs->rdi, (uint32_t)got);
+            total += (uint32_t)got;
+            if ((uint32_t)got < length) {
+                break;  /* end of file */
+            }
+        }
+        regs->rax = (uint64_t)total;
+        return;
+    }
+    case SYS_LSEEK: {
+        /* Three whence values, and only one of them is the offset the caller
+         * means: SEEK_SET from the start, SEEK_CUR from the cursor, SEEK_END
+         * from the size.  A descriptor that is not a file cannot seek, and
+         * says so rather than pretending the cursor is a position. */
+        int64_t offset = (int64_t)regs->rsi;
+        int whence = (int)regs->rdx;
+        int64_t target;
+        uint32_t size;
+        int node;
+
+        if (fd_lookup((int)regs->rdi) == 0) {
+            regs->rax = (uint64_t)-9;
+            return;
+        }
+        if (!fd_seekable((int)regs->rdi)) {
+            regs->rax = (uint64_t)-29; /* ESPIPE: not seekable */
+            return;
+        }
+        node = fd_node((int)regs->rdi);
+        size = (int64_t)vfs_size(node);
+        if (whence == 0) {
+            target = offset;
+        } else if (whence == 1) {
+            target = (int64_t)fd_cursor((int)regs->rdi) + offset;
+        } else if (whence == 2) {
+            target = (int64_t)size + offset;
+        } else {
+            regs->rax = (uint64_t)-22; /* EINVAL */
+            return;
+        }
+        if (target < 0) {
+            regs->rax = (uint64_t)-22;
+            return;
+        }
+        /* Seeking past the end is allowed and is how a program makes a hole
+         * it writes into.  It is not an error until a read happens there. */
+        fd_advance((int)regs->rdi, (uint32_t)target - (uint32_t)fd_cursor((int)regs->rdi));
+        regs->rax = (uint64_t)target;
+        return;
+    }
+    case SYS_CLOSE: {
+        regs->rax = (uint64_t)(int64_t)fd_close((int)regs->rdi);
+        return;
+    }
+    case SYS_IOCTL: {
+        /* Only a window-size query exists, and nothing here has a terminal.
+         *
+         * ENOTTY is the honest answer, but it turns out musl's stdio treats a
+         * failed width query on stdout as a reason to abort during its own
+         * initialisation -- before main -- and then spins in abort calling
+         * sigprocmask.  So a truthful errno was killing the program at a point
+         * where the library had no way to carry on.
+         *
+         * Succeed with a plausible 80x24 and let the library format to that.
+         * Wrong for a real terminal, harmless everywhere else, and it is a
+         * documented limitation rather than a silent lie: nothing in this
+         * kernel has a window size to report. */
+        uint16_t *out = (uint16_t *)(uintptr_t)regs->rdx;
+
+        if (fd_lookup((int)regs->rdi) == 0) {
+            regs->rax = (uint64_t)-9;
+            return;
+        }
+        if (regs->rsi == (uint64_t)TIOCGWINSZ && out != 0) {
+            out[0] = 24U; /* rows */
+            out[1] = 80U; /* columns */
+            out[2] = 0U;
+            out[3] = 0U;
+            regs->rax = 0U;
+            return;
+        }
+        regs->rax = (uint64_t)-25; /* ENOTTY */
+        return;
+    }
     case SYS_SET_TID_ADDRESS:
         /* musl calls this from __init_tp, during TLS setup, before main and
          * with no threading involved.  It hands back the address the thread
